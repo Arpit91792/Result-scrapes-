@@ -234,19 +234,55 @@ export default function AllResultsPage() {
       };
 
       /* ── Excel export ──────────────────────────────────────────────────────────── */
-      const handleExcel = async (filter = 'all') => {
+      const handleExcel = async (filter = 'all', fileName = 'All Results.xlsx') => {
             setExporting(filter);
             try {
                   const res = await api.get(`/results/export/${jobId}/excel?filter=${filter}`, { responseType: 'blob' });
+                  let downloadName = fileName;
+                  const disposition = res.headers && (res.headers['content-disposition'] || res.headers['Content-Disposition']);
+                  if (disposition && disposition.indexOf('filename=') !== -1) {
+                        const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+                        if (matches != null && matches[1]) {
+                              downloadName = matches[1].replace(/['"]/g, '').trim();
+                        }
+                  }
                   const url = URL.createObjectURL(new Blob([res.data]));
                   const a = document.createElement('a');
                   a.href = url;
-                  a.download = `RGPV_${filter}_${jobId.slice(-6)}.xlsx`;
+                  a.download = downloadName;
                   a.click();
                   URL.revokeObjectURL(url);
-                  toast.success('Excel downloaded!');
+                  toast.success(`${downloadName} downloaded!`);
             } catch { toast.error('Export failed — ensure results exist'); }
             finally { setExporting(''); }
+      };
+
+      /* ── Single Student PDF Download ───────────────────────────────────────────── */
+      const [downloadingPdf, setDownloadingPdf] = useState(null);
+      const handleDownloadStudentPDF = async (student) => {
+            setDownloadingPdf(student._id);
+            try {
+                  const res = await api.get(`/results/export/${jobId}/pdf/${student._id}`, { responseType: 'blob' });
+                  let downloadName = `${student.enrollmentNumber}_${(student.studentName || 'Student').trim().replace(/\s+/g, '_')}_Result.pdf`;
+                  const disposition = res.headers && (res.headers['content-disposition'] || res.headers['Content-Disposition']);
+                  if (disposition && disposition.indexOf('filename=') !== -1) {
+                        const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+                        if (matches != null && matches[1]) {
+                              downloadName = matches[1].replace(/['"]/g, '').trim();
+                        }
+                  }
+                  const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = downloadName;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  toast.success(`${downloadName} downloaded!`);
+            } catch {
+                  toast.error('Failed to generate student PDF');
+            } finally {
+                  setDownloadingPdf(null);
+            }
       };
 
       /* ── Filter helpers ────────────────────────────────────────────────────────── */
@@ -439,20 +475,17 @@ export default function AllResultsPage() {
                         </h3>
                         <div className="flex flex-wrap gap-2">
                               {[
-                                    { label: 'All Results.xlsx', filter: 'all', cls: 'btn-primary text-xs py-1.5 !bg-green-700 hover:!bg-green-800' },
-                                    { label: 'Passed Only.xlsx', filter: 'passed', cls: 'btn-primary text-xs py-1.5' },
-                                    { label: 'Failed Only.xlsx', filter: 'failed', cls: 'btn-danger text-xs py-1.5' },
-                              ].map(({ label, filter, cls }) => (
-                                    <button key={filter} onClick={() => handleExcel(filter)} disabled={!!exporting} className={cls}>
+                                    { label: 'All Results.xlsx', filter: 'all', fileName: 'All Results.xlsx', cls: 'btn-primary text-xs py-1.5 !bg-green-700 hover:!bg-green-800' },
+                                    { label: 'Passed Students.xlsx', filter: 'passed', fileName: 'Passed Students.xlsx', cls: 'btn-primary text-xs py-1.5' },
+                                    { label: 'Failed Students.xlsx', filter: 'failed', fileName: 'Failed Students.xlsx', cls: 'btn-danger text-xs py-1.5' },
+                              ].map(({ label, filter, fileName, cls }) => (
+                                    <button key={filter} onClick={() => handleExcel(filter, fileName)} disabled={!!exporting} className={cls}>
                                           {exporting === filter
                                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                                 : <Download className="w-3.5 h-3.5" />}
                                           {label}
                                     </button>
                               ))}
-                              <a href={`/api/results/export/${jobId}/zip`} className="btn-secondary text-xs py-1.5 flex items-center gap-1.5">
-                                    <Archive className="w-3.5 h-3.5" /> PDF Reports.zip
-                              </a>
                         </div>
                   </div>
 
@@ -553,9 +586,27 @@ export default function AllResultsPage() {
                                                       <td className="px-3 py-2.5 text-center"><StatusBadge status={s.resultStatus} /></td>
                                                       <td className="px-3 py-2.5 text-center hidden sm:table-cell"><FetchBadge status={s.fetchStatus} /></td>
                                                       <td className="px-3 py-2.5 text-center">
-                                                            <Link to={`/results/${jobId}/student/${s._id}`} className="text-primary-600 hover:text-primary-800 dark:text-primary-400">
-                                                                  <Eye className="w-4 h-4 mx-auto" />
-                                                            </Link>
+                                                            <div className="flex items-center justify-center gap-1.5">
+                                                                  <Link
+                                                                        to={`/results/${jobId}/student/${s._id}`}
+                                                                        title="View Details"
+                                                                        className="p-1 rounded text-primary-600 hover:text-primary-800 dark:text-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                                                                  >
+                                                                        <Eye className="w-4 h-4" />
+                                                                  </Link>
+                                                                  <button
+                                                                        onClick={() => handleDownloadStudentPDF(s)}
+                                                                        disabled={downloadingPdf === s._id}
+                                                                        title="Download PDF Report"
+                                                                        className="p-1 rounded text-red-600 hover:text-red-800 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition disabled:opacity-50"
+                                                                  >
+                                                                        {downloadingPdf === s._id ? (
+                                                                              <Loader2 className="w-4 h-4 animate-spin text-red-600" />
+                                                                        ) : (
+                                                                              <Download className="w-4 h-4" />
+                                                                        )}
+                                                                  </button>
+                                                            </div>
                                                       </td>
                                                 </tr>
                                           ))}

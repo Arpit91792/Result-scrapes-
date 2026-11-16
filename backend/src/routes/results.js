@@ -10,7 +10,7 @@ const FetchJob = require('../models/FetchJob');
 const StudentResult = require('../models/StudentResult');
 const DownloadHistory = require('../models/DownloadHistory');
 const { generateEnrollments, deduplicateEnrollments, validateEnrollment } = require('../utils/enrollmentGenerator');
-const { generateExcelReport, generateFilteredExcel } = require('../services/excelExporter');
+const { generateExcelReport, generateFilteredExcel, generateExcelFile } = require('../services/excelExporter');
 const { generateStudentPDF, generateZipArchive } = require('../services/pdfExporter');
 const JobProcessor = require('../services/jobProcessor');
 const logger = require('../utils/logger');
@@ -296,15 +296,10 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
             const job = await FetchJob.findOne({ _id: req.params.jobId, userId: req.user._id });
             if (!job) return res.status(404).json({ error: 'Job not found' });
 
-            const filter = req.query.filter; // 'all' | 'passed' | 'failed'
+            const filter = req.query.filter || 'all'; // 'all' | 'passed' | 'failed'
             const students = await StudentResult.find({ jobId: req.params.jobId });
 
-            let result;
-            if (filter && filter !== 'all') {
-                  result = await generateFilteredExcel(job, students, filter, exportsDir);
-            } else {
-                  result = await generateExcelReport(job, students, exportsDir);
-            }
+            const result = await generateExcelFile(job, students, filter, exportsDir);
 
             await DownloadHistory.create({
                   userId: req.user._id,
@@ -314,8 +309,11 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
                   filePath: result.filePath,
             });
 
+            res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+            res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`);
+
             res.download(result.filePath, result.fileName, (err) => {
-                  if (err) logger.error('Download error:', err);
+                  if (err && !res.headersSent) logger.error('Download error:', err);
             });
       } catch (err) {
             next(err);
@@ -325,21 +323,36 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
 // ─── Export PDF ───────────────────────────────────────────────────────────────
 router.get('/export/:jobId/pdf/:studentId', authenticate, async (req, res, next) => {
       try {
-            const student = await StudentResult.findById(req.params.studentId).populate('jobId', 'userId');
+            const student = await StudentResult.findById(req.params.studentId).populate('jobId');
             if (!student) return res.status(404).json({ error: 'Student not found' });
 
-            if (String(student.jobId.userId) !== String(req.user._id) && req.user.role !== 'admin') {
+            if (student.jobId && String(student.jobId.userId) !== String(req.user._id) && req.user.role !== 'admin') {
                   return res.status(403).json({ error: 'Access denied' });
             }
 
             if (!fs.existsSync(exportsDir)) fs.mkdirSync(exportsDir, { recursive: true });
 
-            const fileName = `result_${student.enrollmentNumber}_${Date.now()}.pdf`;
-            const filePath = path.join(exportsDir, fileName);
+            const safeName = (student.studentName || 'Student').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '_').replace(/_+/g, '_');
+            const fileName = `${student.enrollmentNumber}_${safeName}_Result.pdf`;
+            const diskFileName = `${student.enrollmentNumber}_${Date.now()}.pdf`;
+            const filePath = path.join(exportsDir, diskFileName);
 
-            await generateStudentPDF(student.toObject(), filePath);
+            await generateStudentPDF(student.toObject(), filePath, student.jobId ? student.jobId.toObject() : null);
 
-            res.download(filePath, fileName);
+            await DownloadHistory.create({
+                  userId: req.user._id,
+                  jobId: student.jobId ? student.jobId._id : req.params.jobId,
+                  fileName: fileName,
+                  fileType: 'pdf',
+                  filePath: filePath,
+            });
+
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+            res.download(filePath, fileName, (err) => {
+                  if (err && !res.headersSent) logger.error('Download error:', err);
+            });
       } catch (err) {
             next(err);
       }

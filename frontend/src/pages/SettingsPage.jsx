@@ -64,8 +64,6 @@ export default function SettingsPage() {
                         <div className="text-sm text-gray-500 space-y-1">
                               <p>RGPV Smart Bulk Result Manager v1.0</p>
                               <p>Results are fetched from official RGPV portals only.</p>
-                              <p>CAPTCHAs require manual human verification.</p>
-                              <p>All generated files are reference documents, not official transcripts.</p>
                         </div>
                   </div>
             </div>

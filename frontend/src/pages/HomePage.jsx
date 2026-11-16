@@ -49,18 +49,6 @@ export default function HomePage() {
                         </p>
                   </div>
 
-                  {/* Important Notice */}
-                  <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-5">
-                        <h3 className="font-semibold text-amber-800 dark:text-amber-400 mb-2">⚠️ Important Usage Notice</h3>
-                        <ul className="text-sm text-amber-700 dark:text-amber-300 space-y-1 list-disc list-inside">
-                              <li>This tool fetches results only from official, publicly accessible RGPV portals.</li>
-                              <li>CAPTCHA challenges are presented to users for manual completion — never automatically bypassed.</li>
-                              <li>Generated Excel and PDF files are reference documents, not official marksheets.</li>
-                              <li>Use Demo Mode to test the system without accessing the live portal.</li>
-                              <li>Unauthorized scraping or bulk automated access may violate RGPV terms of service.</li>
-                        </ul>
-                  </div>
-
                   {/* Features Grid */}
                   <div>
                         <h2 className="text-xl font-bold text-gray-800 dark:text-gray-200 mb-4">Features</h2>

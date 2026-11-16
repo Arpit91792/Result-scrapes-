@@ -73,8 +73,9 @@ export default function Sidebar({ open, onClose }) {
                         </nav>
 
                         {/* Footer */}
-                        <div className="p-4 border-t border-navy-800">
-                              <p className="text-white/40 text-xs text-center">RGPV Smart Result Manager v1.0</p>
+                        <div className="p-4 border-t border-navy-800 text-center">
+                              <p className="text-white/40 text-xs">RGPV Smart Result Manager v1.0</p>
+                              <p className="text-white/30 text-[10px] mt-0.5">by Arpit Tripathi</p>
                         </div>
                   </aside>
             </>

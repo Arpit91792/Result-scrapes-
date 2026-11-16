@@ -29,12 +29,21 @@ export default function StudentDetailsPage() {
       const handleDownloadPDF = async () => {
             try {
                   const res = await api.get(`/results/export/${jobId}/pdf/${studentId}`, { responseType: 'blob' });
-                  const url = URL.createObjectURL(new Blob([res.data]));
+                  let downloadName = `${student.enrollmentNumber}_${(student.studentName || 'Student').trim().replace(/\s+/g, '_')}_Result.pdf`;
+                  const disposition = res.headers && (res.headers['content-disposition'] || res.headers['Content-Disposition']);
+                  if (disposition && disposition.indexOf('filename=') !== -1) {
+                        const matches = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/.exec(disposition);
+                        if (matches != null && matches[1]) {
+                              downloadName = matches[1].replace(/['"]/g, '').trim();
+                        }
+                  }
+                  const url = URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }));
                   const a = document.createElement('a');
                   a.href = url;
-                  a.download = `result_${student.enrollmentNumber}.pdf`;
+                  a.download = downloadName;
                   a.click();
                   URL.revokeObjectURL(url);
+                  toast.success(`${downloadName} downloaded!`);
             } catch {
                   toast.error('PDF generation failed');
             }
