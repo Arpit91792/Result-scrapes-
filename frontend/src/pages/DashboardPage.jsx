@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BarChart3, Clock, CheckCircle, XCircle, PauseCircle, Users, Download, ArrowRight, Layers } from 'lucide-react';
+import { BarChart3, Clock, CheckCircle, XCircle, PauseCircle, Users, Download, ArrowRight, Layers, Trash2, Loader2 } from 'lucide-react';
 import api from '../services/api';
+import toast from 'react-hot-toast';
 
-function JobCard({ job }) {
+function JobCard({ job, onDelete, deletingId }) {
       const pct = job.totalStudents ? Math.round((job.completedCount / job.totalStudents) * 100) : 0;
       const statusColors = {
             running: 'bg-blue-100 text-blue-700',
@@ -15,7 +16,7 @@ function JobCard({ job }) {
       };
 
       return (
-            <Link to={`/results/${job._id}`} className="card hover:shadow-md transition-shadow block">
+            <Link to={`/results/${job._id}`} className="card hover:shadow-md transition-shadow block relative group">
                   <div className="flex items-start justify-between mb-3">
                         <div>
                               <p className="font-semibold text-gray-800 dark:text-gray-200">
@@ -29,12 +30,28 @@ function JobCard({ job }) {
                         <div className="flex items-center gap-1.5">
                               {job.status === 'running' && (
                                     <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 border border-blue-200 flex items-center gap-1">
-                                          <Layers className="w-3 h-3" /> {job.maxTabs || 50} Tabs
+                                          <Layers className="w-3 h-3" /> {job.maxTabs || 100} Tabs
                                     </span>
                               )}
                               <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${statusColors[job.status] || 'bg-gray-100 text-gray-600'}`}>
                                     {job.status}
                               </span>
+                              <button
+                                    onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          onDelete(job);
+                                    }}
+                                    disabled={deletingId === job._id}
+                                    title="Delete this fetch job"
+                                    className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors ml-1"
+                              >
+                                    {deletingId === job._id ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin text-red-600" />
+                                    ) : (
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                    )}
+                              </button>
                         </div>
                   </div>
 
@@ -61,13 +78,34 @@ function JobCard({ job }) {
 export default function DashboardPage() {
       const [jobs, setJobs] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [deletingId, setDeletingId] = useState(null);
 
-      useEffect(() => {
+      const fetchJobs = () => {
             api.get('/results/jobs')
                   .then(res => setJobs(res.data.jobs))
                   .catch(() => { })
                   .finally(() => setLoading(false));
+      };
+
+      useEffect(() => {
+            fetchJobs();
       }, []);
+
+      const handleDeleteJob = async (job) => {
+            const confirmMsg = `Are you sure you want to delete this fetch job (${job.collegeCode} · ${job.branch} Sem ${job.semester})?\n\nThis will permanently delete the job and all its student result records.`;
+            if (!window.confirm(confirmMsg)) return;
+
+            setDeletingId(job._id);
+            try {
+                  await api.delete(`/results/job/${job._id}`);
+                  toast.success('Fetch job deleted successfully');
+                  setJobs(prev => prev.filter(j => j._id !== job._id));
+            } catch (err) {
+                  toast.error(err.response?.data?.error || 'Failed to delete job');
+            } finally {
+                  setDeletingId(null);
+            }
+      };
 
       const totalStudents = jobs.reduce((a, j) => a + (j.totalStudents || 0), 0);
       const totalPassed = jobs.reduce((a, j) => a + (j.passedCount || 0), 0);
@@ -127,7 +165,14 @@ export default function DashboardPage() {
                               </div>
                         ) : (
                               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {jobs.map(job => <JobCard key={job._id} job={job} />)}
+                                    {jobs.map(job => (
+                                          <JobCard
+                                                key={job._id}
+                                                job={job}
+                                                onDelete={handleDeleteJob}
+                                                deletingId={deletingId}
+                                          />
+                                    ))}
                               </div>
                         )}
                   </div>

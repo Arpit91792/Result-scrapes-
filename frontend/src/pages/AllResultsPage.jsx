@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
       Users, CheckCircle, XCircle, Clock, AlertTriangle, AlertCircle,
       Download, Pause, Play, StopCircle, RefreshCw, Search,
       ChevronUp, ChevronDown, Eye, Wifi, WifiOff, Terminal,
       FileSpreadsheet, Archive, ExternalLink, Loader2, ScanLine, Brain,
-      Layers, Monitor, Activity
+      Layers, Monitor, Activity, Trash2
 } from 'lucide-react';
 import api from '../services/api';
 import {
@@ -123,6 +123,7 @@ function StatCard({ icon: Icon, label, value, color }) {
 /* ── Main page ─────────────────────────────────────────────────────────────── */
 export default function AllResultsPage() {
       const { jobId } = useParams();
+      const navigate = useNavigate();
       const [job, setJob] = useState(null);
       const [students, setStudents] = useState([]);
       const [total, setTotal] = useState(0);
@@ -134,6 +135,7 @@ export default function AllResultsPage() {
       const [captchaState, setCaptchaState] = useState(null);  // OCR status
       const [manualAlert, setManualAlert] = useState(false); // manual fallback
       const [exporting, setExporting] = useState('');
+      const [deleting, setDeleting] = useState(false);
       const [filters, setFilters] = useState({
             status: '', search: '', sortBy: 'enrollmentNumber', sortOrder: 'asc',
       });
@@ -267,6 +269,21 @@ export default function AllResultsPage() {
             toast.success('Verification signal sent — processing will resume');
       };
 
+      const handleDeleteCurrentJob = async () => {
+            if (!window.confirm(`Are you sure you want to delete this fetch job (${job?.collegeCode || ''} · ${job?.branch || ''} Sem ${job?.semester || ''})? This will permanently delete all student results for this job.`)) {
+                  return;
+            }
+            setDeleting(true);
+            try {
+                  await api.delete(`/results/job/${jobId}`);
+                  toast.success('Fetch job deleted successfully');
+                  navigate('/dashboard');
+            } catch (err) {
+                  toast.error(err.response?.data?.error || 'Failed to delete job');
+                  setDeleting(false);
+            }
+      };
+
       /* ── Excel export ──────────────────────────────────────────────────────────── */
       const handleExcel = async (filter = 'all', fileName = 'All Results.xlsx') => {
             setExporting(filter);
@@ -373,6 +390,11 @@ export default function AllResultsPage() {
                                     {job?.dataSource === 'demo' && (
                                           <span className="ml-2 bg-amber-100 text-amber-700 text-xs px-2 py-0.5 rounded-full font-semibold">DEMO</span>
                                     )}
+                                    {job?.lateralStartingEnrollment && (
+                                          <span className="ml-2 bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded-full font-medium">
+                                                Incl. Lateral ({job.lateralStartingEnrollment}–{job.lateralEndingEnrollment})
+                                          </span>
+                                    )}
                               </p>
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
@@ -434,11 +456,11 @@ export default function AllResultsPage() {
                                                 Active Browser Tabs (Headless Background)
                                           </h2>
                                           <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-400/40">
-                                                Active Tabs: {p?.activeTabsCount ?? (tabs.length || (p?.status === 'running' ? (p?.maxTabs || 50) : 0))} / {p?.maxTabs || 50}
+                                                Active Tabs: {p?.activeTabsCount ?? (tabs.length || (p?.status === 'running' ? (p?.maxTabs || 100) : 0))} / {p?.maxTabs || 100}
                                           </span>
                                     </div>
                                     <p className="text-xs text-slate-400 mt-1">
-                                          Operating {p?.maxTabs || 50} concurrent tabs in the background with automatic tab reuse upon student completion.
+                                          Operating {p?.maxTabs || 100} concurrent tabs in the background with automatic tab reuse upon student completion.
                                     </p>
                               </div>
                         </div>
@@ -521,6 +543,15 @@ export default function AllResultsPage() {
                               )}
                               <button onClick={() => { fetchJob(); fetchStudents(); }} className="btn-secondary text-xs py-1.5">
                                     <RefreshCw className="w-3.5 h-3.5" /> Refresh
+                              </button>
+                              <button
+                                    onClick={handleDeleteCurrentJob}
+                                    disabled={deleting}
+                                    className="btn-danger text-xs py-1.5 ml-auto flex items-center gap-1.5"
+                                    title="Delete this entire fetch job and all its student results"
+                              >
+                                    {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                                    Delete Job
                               </button>
                         </div>
                   </div>

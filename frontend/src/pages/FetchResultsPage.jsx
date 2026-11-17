@@ -67,9 +67,14 @@ export default function FetchResultsPage() {
             examinationYear: String(new Date().getFullYear()),
             examinationSession: 'November',
             resultType: 'Main', resultMode: 'Grading',
-            enrollmentPrefix: '', startingEnrollment: '', endingEnrollment: '',
+            enrollmentPrefix: '',
+            startingEnrollment: '',
+            endingEnrollment: '',
+            lateralStartingEnrollment: '',
+            lateralEndingEnrollment: '',
       });
 
+      const [includeLateral, setIncludeLateral] = useState(false);
       const [demoMode, setDemoMode] = useState(false);
       const [generating, setGenerating] = useState(false);
       const [enrollmentResult, setEnrollmentResult] = useState(null);
@@ -83,22 +88,39 @@ export default function FetchResultsPage() {
 
       // ── Generate enrollment list ─────────────────────────────────────────────────
       const handleGenerate = async () => {
-            if (!form.startingEnrollment || !form.endingEnrollment) {
-                  toast.error('Enter starting and ending enrollment numbers');
+            const hasRegular = Boolean(form.startingEnrollment && form.endingEnrollment);
+            const hasLateral = Boolean(includeLateral && form.lateralStartingEnrollment && form.lateralEndingEnrollment);
+
+            if (!hasRegular && !hasLateral) {
+                  toast.error('Enter starting and ending enrollment numbers for regular or lateral entry');
                   return;
             }
+
+            if (includeLateral && (!form.lateralStartingEnrollment || !form.lateralEndingEnrollment) && !hasRegular) {
+                  toast.error('Enter both starting and ending enrollment numbers for lateral entry');
+                  return;
+            }
+
             setGenerating(true);
             setEnrollmentError(null);
             try {
-                  const res = await api.post('/results/generate-enrollments', {
-                        startingEnrollment: form.startingEnrollment.trim().toUpperCase(),
-                        endingEnrollment: form.endingEnrollment.trim().toUpperCase(),
-                  });
+                  const payload = {
+                        ...(hasRegular ? {
+                              startingEnrollment: form.startingEnrollment.trim().toUpperCase(),
+                              endingEnrollment: form.endingEnrollment.trim().toUpperCase(),
+                        } : {}),
+                        ...(hasLateral ? {
+                              lateralStartingEnrollment: form.lateralStartingEnrollment.trim().toUpperCase(),
+                              lateralEndingEnrollment: form.lateralEndingEnrollment.trim().toUpperCase(),
+                        } : {}),
+                  };
+
+                  const res = await api.post('/results/generate-enrollments', payload);
                   setEnrollmentResult(res.data);
                   setUploadedList(null);
                   toast.success(`Generated ${res.data.total} enrollment numbers`);
             } catch (err) {
-                  const msg = err.response?.data?.errors?.map(e => e.msg).join(', ')
+                  const msg = err.response?.data?.errors?.map(e => e.msg || e).join(', ')
                         || err.response?.data?.error || 'Generation failed';
                   setEnrollmentError(msg);
             } finally {
@@ -135,6 +157,10 @@ export default function FetchResultsPage() {
                         ...form,
                         semester: parseInt(form.semester),
                         demoMode,
+                        ...(includeLateral && form.lateralStartingEnrollment && form.lateralEndingEnrollment ? {
+                              lateralStartingEnrollment: form.lateralStartingEnrollment.trim().toUpperCase(),
+                              lateralEndingEnrollment: form.lateralEndingEnrollment.trim().toUpperCase(),
+                        } : {}),
                         ...(uploadedList ? { customEnrollments: uploadedList } : {}),
                   };
                   const res = await api.post('/results/start-fetch', payload);
@@ -272,26 +298,85 @@ export default function FetchResultsPage() {
                               Enrollment Range
                         </h2>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-                              <div>
-                                    <label className="label">Prefix (reference)</label>
-                                    <input className="input font-mono" placeholder="0133CS24" value={form.enrollmentPrefix} onChange={set('enrollmentPrefix')} />
+                        {/* Regular Students Range */}
+                        <div className="mb-4">
+                              <div className="flex items-center justify-between mb-2">
+                                    <p className="text-xs font-semibold text-gray-600 dark:text-gray-300 uppercase tracking-wider">
+                                          Regular Students Range
+                                    </p>
+                                    <span className="text-[11px] text-gray-400">1st Year Admitted Batch</span>
                               </div>
-                              <div>
-                                    <label className="label">Starting Enrollment *</label>
-                                    <input className="input font-mono uppercase" placeholder="0133CS241001"
-                                          value={form.startingEnrollment}
-                                          onChange={e => setForm(f => ({ ...f, startingEnrollment: e.target.value.toUpperCase() }))} />
-                              </div>
-                              <div>
-                                    <label className="label">Ending Enrollment *</label>
-                                    <input className="input font-mono uppercase" placeholder="0133CS241067"
-                                          value={form.endingEnrollment}
-                                          onChange={e => setForm(f => ({ ...f, endingEnrollment: e.target.value.toUpperCase() }))} />
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div>
+                                          <label className="label">Starting Enrollment</label>
+                                          <input
+                                                className="input font-mono uppercase"
+                                                placeholder="e.g. 0133CS241001"
+                                                value={form.startingEnrollment}
+                                                onChange={e => setForm(f => ({ ...f, startingEnrollment: e.target.value.toUpperCase() }))}
+                                          />
+                                    </div>
+                                    <div>
+                                          <label className="label">Ending Enrollment</label>
+                                          <input
+                                                className="input font-mono uppercase"
+                                                placeholder="e.g. 0133CS241067"
+                                                value={form.endingEnrollment}
+                                                onChange={e => setForm(f => ({ ...f, endingEnrollment: e.target.value.toUpperCase() }))}
+                                          />
+                                    </div>
                               </div>
                         </div>
 
-                        <div className="flex flex-wrap gap-3">
+                        {/* Lateral Entry Students Option */}
+                        <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">
+                              <label className="inline-flex items-center gap-2.5 cursor-pointer select-none">
+                                    <input
+                                          type="checkbox"
+                                          checked={includeLateral}
+                                          onChange={e => setIncludeLateral(e.target.checked)}
+                                          className="w-4 h-4 text-primary-600 rounded border-gray-300 dark:border-gray-600 focus:ring-primary-500 cursor-pointer"
+                                    />
+                                    <span className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                                          Include Lateral Entry Students (Diploma / 2nd Year Direct Entry)
+                                    </span>
+                              </label>
+
+                              {includeLateral && (
+                                    <div className="mt-3 bg-blue-50/60 dark:bg-blue-900/15 border border-blue-200 dark:border-blue-800/50 rounded-xl p-4">
+                                          <div className="flex items-center justify-between mb-2.5">
+                                                <p className="text-xs font-semibold text-blue-800 dark:text-blue-300 uppercase tracking-wider">
+                                                      Lateral Entry Range
+                                                </p>
+                                                <span className="text-[11px] text-blue-600 dark:text-blue-400">
+                                                      Roll series like 3D01 or 3001
+                                                </span>
+                                          </div>
+                                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                                <div>
+                                                      <label className="label">Lateral Starting Enrollment *</label>
+                                                      <input
+                                                            className="input font-mono uppercase bg-white dark:bg-gray-900"
+                                                            placeholder="e.g. 0133CS253D01 or 0133CS243001"
+                                                            value={form.lateralStartingEnrollment}
+                                                            onChange={e => setForm(f => ({ ...f, lateralStartingEnrollment: e.target.value.toUpperCase() }))}
+                                                      />
+                                                </div>
+                                                <div>
+                                                      <label className="label">Lateral Ending Enrollment *</label>
+                                                      <input
+                                                            className="input font-mono uppercase bg-white dark:bg-gray-900"
+                                                            placeholder="e.g. 0133CS253D12 or 0133CS243015"
+                                                            value={form.lateralEndingEnrollment}
+                                                            onChange={e => setForm(f => ({ ...f, lateralEndingEnrollment: e.target.value.toUpperCase() }))}
+                                                      />
+                                                </div>
+                                          </div>
+                                    </div>
+                              )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-3 mt-5">
                               <button onClick={handleGenerate} disabled={generating} className="btn-primary">
                                     {generating
                                           ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating...</>
@@ -313,32 +398,40 @@ export default function FetchResultsPage() {
 
                         {enrollmentResult && (
                               <div className="mt-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4">
-                                    <div className="flex items-center gap-2 mb-3">
-                                          <CheckCircle className="w-5 h-5 text-green-600" />
-                                          <span className="font-semibold text-green-800 dark:text-green-400">
-                                                {enrollmentResult.total} Enrollment Numbers Ready
-                                          </span>
+                                    <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                                          <div className="flex items-center gap-2">
+                                                <CheckCircle className="w-5 h-5 text-green-600" />
+                                                <span className="font-semibold text-green-800 dark:text-green-400">
+                                                      {enrollmentResult.total} Enrollment Numbers Ready
+                                                </span>
+                                          </div>
+                                          {enrollmentResult.regular && enrollmentResult.lateral && (
+                                                <div className="flex items-center gap-2 text-xs">
+                                                      <span className="bg-white dark:bg-gray-800 px-2.5 py-1 rounded border border-green-200 dark:border-green-800 text-gray-700 dark:text-gray-300 font-medium">
+                                                            {enrollmentResult.regular.total} Regular
+                                                      </span>
+                                                      <span className="bg-white dark:bg-gray-800 px-2.5 py-1 rounded border border-green-200 dark:border-green-800 text-blue-600 dark:text-blue-400 font-medium">
+                                                            +{enrollmentResult.lateral.total} Lateral Entry
+                                                      </span>
+                                                </div>
+                                          )}
                                     </div>
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm mb-3">
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm mb-3">
                                           <div className="bg-white dark:bg-gray-800 rounded-lg p-3 text-center">
                                                 <p className="text-2xl font-bold text-navy-700 dark:text-primary-400">{enrollmentResult.total}</p>
-                                                <p className="text-gray-400 text-xs">Total</p>
+                                                <p className="text-gray-400 text-xs">Total Students</p>
                                           </div>
                                           <div className="bg-white dark:bg-gray-800 rounded-lg p-3 text-center">
                                                 <p className="font-mono font-bold text-xs text-gray-700 dark:text-gray-300 break-all">
                                                       {enrollmentResult.firstEnrollment || enrollmentResult.enrollments?.[0]}
                                                 </p>
-                                                <p className="text-gray-400 text-xs">First</p>
+                                                <p className="text-gray-400 text-xs">First Enrollment</p>
                                           </div>
                                           <div className="bg-white dark:bg-gray-800 rounded-lg p-3 text-center">
                                                 <p className="font-mono font-bold text-xs text-gray-700 dark:text-gray-300 break-all">
                                                       {enrollmentResult.lastEnrollment || enrollmentResult.enrollments?.[enrollmentResult.total - 1]}
                                                 </p>
-                                                <p className="text-gray-400 text-xs">Last</p>
-                                          </div>
-                                          <div className="bg-white dark:bg-gray-800 rounded-lg p-3 text-center">
-                                                <p className="font-mono text-xs text-gray-600 dark:text-gray-300">{enrollmentResult.prefix || '—'}</p>
-                                                <p className="text-gray-400 text-xs">Prefix</p>
+                                                <p className="text-gray-400 text-xs">Last Enrollment</p>
                                           </div>
                                     </div>
 
