@@ -42,21 +42,78 @@ const upload = multer({
 const exportsDir = path.join(__dirname, '../../exports');
 
 // ─── Generate Enrollments ─────────────────────────────────────────────────────
-router.post('/generate-enrollments', authenticate, [
-      body('startingEnrollment').trim().notEmpty().withMessage('Starting enrollment required'),
-      body('endingEnrollment').trim().notEmpty().withMessage('Ending enrollment required'),
-], (req, res) => {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+router.post('/generate-enrollments', authenticate, async (req, res) => {
+      try {
+            const {
+                  startingEnrollment,
+                  endingEnrollment,
+                  lateralStartingEnrollment,
+                  lateralEndingEnrollment,
+            } = req.body;
 
-      const { startingEnrollment, endingEnrollment } = req.body;
-      const result = generateEnrollments(startingEnrollment, endingEnrollment);
+            const hasRegular = Boolean(startingEnrollment && endingEnrollment);
+            const hasLateral = Boolean(lateralStartingEnrollment && lateralEndingEnrollment);
 
-      if (!result.success) {
-            return res.status(400).json({ errors: result.errors });
+            if (!hasRegular && !hasLateral) {
+                  return res.status(400).json({
+                        errors: [{ msg: 'Please provide either Regular enrollment range or Lateral Entry enrollment range (or both).' }]
+                  });
+            }
+
+            let regularResult = null;
+            let lateralResult = null;
+            const allErrors = [];
+
+            if (hasRegular) {
+                  const regGen = generateEnrollments(startingEnrollment.trim().toUpperCase(), endingEnrollment.trim().toUpperCase());
+                  if (!regGen.success) {
+                        allErrors.push(...regGen.errors.map(e => `Regular: ${e}`));
+                  } else {
+                        regularResult = regGen;
+                  }
+            }
+
+            if (hasLateral) {
+                  const latGen = generateEnrollments(lateralStartingEnrollment.trim().toUpperCase(), lateralEndingEnrollment.trim().toUpperCase());
+                  if (!latGen.success) {
+                        allErrors.push(...latGen.errors.map(e => `Lateral Entry: ${e}`));
+                  } else {
+                        lateralResult = latGen;
+                  }
+            }
+
+            if (allErrors.length > 0) {
+                  return res.status(400).json({ errors: allErrors.map(msg => ({ msg })) });
+            }
+
+            const combinedEnrollments = [
+                  ...(regularResult?.enrollments || []),
+                  ...(lateralResult?.enrollments || []),
+            ];
+
+            const { unique } = deduplicateEnrollments(combinedEnrollments);
+
+            res.json({
+                  success: true,
+                  enrollments: unique,
+                  total: unique.length,
+                  firstEnrollment: unique[0],
+                  lastEnrollment: unique[unique.length - 1],
+                  regular: regularResult ? {
+                        total: regularResult.total,
+                        firstEnrollment: regularResult.firstEnrollment,
+                        lastEnrollment: regularResult.lastEnrollment,
+                  } : null,
+                  lateral: lateralResult ? {
+                        total: lateralResult.total,
+                        firstEnrollment: lateralResult.firstEnrollment,
+                        lastEnrollment: lateralResult.lastEnrollment,
+                  } : null,
+            });
+      } catch (err) {
+            logger.error('Generate enrollments error:', err);
+            res.status(500).json({ error: 'Failed to generate enrollments' });
       }
-
-      res.json(result);
 });
 
 // ─── Upload Enrollments from CSV/Excel ────────────────────────────────────────
@@ -107,8 +164,10 @@ router.post('/start-fetch', authenticate, [
       body('semester').isInt({ min: 1, max: 8 }),
       body('examinationYear').trim().notEmpty(),
       body('examinationSession').isIn(['June', 'November']),
-      body('startingEnrollment').trim().notEmpty(),
-      body('endingEnrollment').trim().notEmpty(),
+      body('startingEnrollment').optional().trim(),
+      body('endingEnrollment').optional().trim(),
+      body('lateralStartingEnrollment').optional().trim(),
+      body('lateralEndingEnrollment').optional().trim(),
       body('demoMode').optional().isBoolean(),
 ], async (req, res, next) => {
       try {
@@ -119,6 +178,7 @@ router.post('/start-fetch', authenticate, [
                   collegeCode, collegeName, university, course, branch, semester,
                   examinationYear, examinationSession, resultType, resultMode,
                   enrollmentPrefix, startingEnrollment, endingEnrollment,
+                  lateralStartingEnrollment, lateralEndingEnrollment,
                   customEnrollments, demoMode,
             } = req.body;
 
@@ -128,11 +188,37 @@ router.post('/start-fetch', authenticate, [
                   const { unique } = deduplicateEnrollments(customEnrollments);
                   enrollments = unique;
             } else {
-                  const genResult = generateEnrollments(startingEnrollment, endingEnrollment);
-                  if (!genResult.success) {
-                        return res.status(400).json({ errors: genResult.errors });
+                  const hasRegular = Boolean(startingEnrollment && endingEnrollment);
+                  const hasLateral = Boolean(lateralStartingEnrollment && lateralEndingEnrollment);
+
+                  if (!hasRegular && !hasLateral) {
+                        return res.status(400).json({ error: 'Please provide either regular enrollment range or lateral entry range' });
                   }
-                  enrollments = genResult.enrollments;
+
+                  let regularList = [];
+                  let lateralList = [];
+
+                  if (hasRegular) {
+                        const regResult = generateEnrollments(startingEnrollment.trim().toUpperCase(), endingEnrollment.trim().toUpperCase());
+                        if (!regResult.success) {
+                              return res.status(400).json({ errors: regResult.errors.map(msg => ({ msg: `Regular: ${msg}` })) });
+                        }
+                        regularList = regResult.enrollments;
+                  }
+
+                  if (hasLateral) {
+                        const latResult = generateEnrollments(lateralStartingEnrollment.trim().toUpperCase(), lateralEndingEnrollment.trim().toUpperCase());
+                        if (!latResult.success) {
+                              return res.status(400).json({ errors: latResult.errors.map(msg => ({ msg: `Lateral Entry: ${msg}` })) });
+                        }
+                        lateralList = latResult.enrollments;
+                  }
+
+                  const { unique } = deduplicateEnrollments([...regularList, ...lateralList]);
+                  if (!unique.length) {
+                        return res.status(400).json({ error: 'No enrollment numbers could be generated from the provided range(s)' });
+                  }
+                  enrollments = unique;
             }
 
             const job = new FetchJob({
@@ -148,8 +234,10 @@ router.post('/start-fetch', authenticate, [
                   resultType: resultType || 'Main',
                   resultMode: resultMode || 'Grading',
                   enrollmentPrefix,
-                  startingEnrollment,
-                  endingEnrollment,
+                  startingEnrollment: startingEnrollment || enrollments[0],
+                  endingEnrollment: endingEnrollment || enrollments[enrollments.length - 1],
+                  lateralStartingEnrollment: lateralStartingEnrollment || undefined,
+                  lateralEndingEnrollment: lateralEndingEnrollment || undefined,
                   enrollmentList: enrollments,
                   totalStudents: enrollments.length,
                   pendingCount: enrollments.length,
@@ -236,6 +324,37 @@ router.post('/job/:jobId/cancel', authenticate, async (req, res, next) => {
 
             await getJobProcessor(req).cancelJob(req.params.jobId);
             res.json({ message: 'Job cancelled' });
+      } catch (err) {
+            next(err);
+      }
+});
+
+// ─── Delete Job ────────────────────────────────────────────────────────────────
+router.delete('/job/:jobId', authenticate, async (req, res, next) => {
+      try {
+            const job = await FetchJob.findOne({ _id: req.params.jobId, userId: req.user._id });
+            if (!job) return res.status(404).json({ error: 'Job not found' });
+
+            // If job is currently running, stop/cancel it first
+            if (job.status === 'running') {
+                  try {
+                        await getJobProcessor(req).cancelJob(req.params.jobId);
+                  } catch (e) {
+                        logger.warn(`Error cancelling running job before delete: ${e.message}`);
+                  }
+            }
+
+            // Delete all associated student results
+            await StudentResult.deleteMany({ jobId: req.params.jobId });
+
+            // Delete any associated download history
+            await DownloadHistory.deleteMany({ jobId: req.params.jobId });
+
+            // Delete the job document itself
+            await FetchJob.deleteOne({ _id: req.params.jobId });
+
+            logger.info(`Job ${req.params.jobId} and associated records deleted by user ${req.user._id}`);
+            res.json({ message: 'Fetch job and associated records deleted successfully' });
       } catch (err) {
             next(err);
       }

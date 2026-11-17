@@ -29,6 +29,7 @@ const META_LABEL_BG = 'FFF1F5F9';
 // ── RGPV Subject Names Catalog ────────────────────────────────────────────────
 const SUBJECT_NAMES = {
       'BT401': 'Mathematics- III',
+      'ES401': 'Energy & Environmental Engineering',
       'CS402': 'Analysis Design of Algorithm',
       'CS403': 'Software Engineering',
       'CS404': 'Computer Org. & Architecture',
@@ -163,22 +164,87 @@ function applyBorders(row, startCol, endCol, color = BORDER_COLOR) {
       }
 }
 
+// ── Branch & Subject Filtering Constants ─────────────────────────────────────
+const FOREIGN_BRANCH_PREFIXES = {
+      'CSE': ['ME', 'CE', 'CH', 'AU', 'TX', 'FT', 'MM', 'EE', 'EX', 'EC'],
+      'CS': ['ME', 'CE', 'CH', 'AU', 'TX', 'FT', 'MM', 'EE', 'EX', 'EC'],
+      'IT': ['ME', 'CE', 'CH', 'AU', 'TX', 'FT', 'MM', 'EE', 'EX', 'EC'],
+      'ME': ['CS', 'IT', 'CE', 'EC', 'EE', 'EX', 'CH', 'AU'],
+      'CE': ['CS', 'IT', 'ME', 'EC', 'EE', 'EX', 'CH'],
+      'EC': ['CS', 'IT', 'ME', 'CE', 'CH'],
+      'ECE': ['CS', 'IT', 'ME', 'CE', 'CH'],
+      'EE': ['CS', 'IT', 'ME', 'CE', 'CH'],
+      'EX': ['CS', 'IT', 'ME', 'CE', 'CH'],
+};
+
+function getStudentActualBranch(s) {
+      if (!s) return null;
+      if (s.subjects && Array.isArray(s.subjects)) {
+            for (const sub of s.subjects) {
+                  const code = String(sub.subjectCode || '');
+                  const m = code.match(/Branch\s*[:\t]?\s*([A-Za-z]+)/i);
+                  if (m) return m[1].trim().toUpperCase();
+                  if (code === 'Course' && sub.grade) {
+                        return String(sub.grade).trim().toUpperCase();
+                  }
+            }
+      }
+      return (s.branch || '').trim().toUpperCase() || null;
+}
+
+function isSubjectCompatibleWithBranch(p, jobBranch, studentCount, totalStudents) {
+      if (!p || !p.baseCode) return false;
+      const code = p.baseCode.toUpperCase();
+      const branch = (jobBranch || '').toUpperCase().trim();
+
+      // Disallow explicitly foreign branch prefixes (e.g. ME subjects in CSE)
+      const forbidden = FOREIGN_BRANCH_PREFIXES[branch];
+      if (forbidden) {
+            for (const prefix of forbidden) {
+                  if (code.startsWith(prefix)) {
+                        return false;
+                  }
+            }
+      }
+
+      // Departmental cohort rule:
+      // In cohorts (>= 20 students), subjects that do not match the departmental prefix (e.g. CS for CSE)
+      // and only appear for a tiny fraction (< 5% and <= 3 students) are foreign/stray subjects from branch transfers or ex-students.
+      const deptPrefix = branch === 'CSE' ? 'CS' : branch;
+      if (totalStudents >= 20 && !code.startsWith(deptPrefix)) {
+            const ratio = studentCount / totalStudents;
+            if (ratio < 0.05 && studentCount <= 3) {
+                  return false;
+            }
+      }
+
+      return true;
+}
+
+function isNotFoundStudent(s) {
+      if (!s) return true;
+      if (s.resultStatus === 'NOT_FOUND' || s.fetchStatus === 'missing') return true;
+      if (s.resultStatus === 'PENDING' && !s.studentName && (!s.subjects || s.subjects.length === 0)) return true;
+      if (!s.studentName && s.sgpa == null && (!s.subjects || s.subjects.length === 0)) return true;
+      return false;
+}
+
 /**
  * Build consolidated dataset and metadata from Job and Students
  */
 function analyzeResults(job, students = []) {
-      const enrollmentSet = new Set();
+      const candidateEnrollments = new Set();
       if (job.enrollmentList && Array.isArray(job.enrollmentList) && job.enrollmentList.length > 0) {
-            job.enrollmentList.forEach(e => { if (e) enrollmentSet.add(String(e).trim()); });
+            job.enrollmentList.forEach(e => { if (e) candidateEnrollments.add(String(e).trim()); });
       } else if (job.startingEnrollment && job.endingEnrollment) {
             const gen = generateEnrollments(job.startingEnrollment, job.endingEnrollment);
             if (gen.success && Array.isArray(gen.enrollments)) {
-                  gen.enrollments.forEach(e => enrollmentSet.add(String(e).trim()));
+                  gen.enrollments.forEach(e => candidateEnrollments.add(String(e).trim()));
             }
       }
 
       students.forEach(s => {
-            if (s.enrollmentNumber) enrollmentSet.add(String(s.enrollmentNumber).trim());
+            if (s.enrollmentNumber) candidateEnrollments.add(String(s.enrollmentNumber).trim());
       });
 
       const studentMap = new Map();
@@ -188,18 +254,50 @@ function analyzeResults(job, students = []) {
             }
       });
 
-      const sortedEnrollments = Array.from(enrollmentSet).sort(compareEnrollments);
+      // Filter out all students who were NOT FOUND on the portal (remove their rows/details from Excel)
+      const enrollmentSet = new Set();
+      candidateEnrollments.forEach(enr => {
+            const s = studentMap.get(enr.toUpperCase());
+            if (!isNotFoundStudent(s)) {
+                  enrollmentSet.add(enr);
+            }
+      });
 
-      // Extract distinct subjects
-      const subjectMap = new Map();
+      const sortedEnrollments = Array.from(enrollmentSet).sort(compareEnrollments);
+      const jobBranch = (job.branch || '').trim().toUpperCase();
+
+      // Count subject frequencies across all students
+      const subjectFreq = new Map();
+      const rawSubjectMap = new Map();
+
       students.forEach(s => {
+            const sBranch = getStudentActualBranch(s);
+            // If student's actual branch is known and differs from jobBranch, skip for subject discovery
+            const isForeignStudent = sBranch && (
+                  (jobBranch === 'CSE' || jobBranch === 'CS') ? (sBranch !== 'CS' && sBranch !== 'CSE') : (sBranch !== jobBranch)
+            );
+
             (s.subjects || []).forEach(sub => {
                   const p = parseSubjectCode(sub.subjectCode);
-                  if (p && !subjectMap.has(p.label)) {
-                        subjectMap.set(p.label, p);
+                  if (p) {
+                        if (!isForeignStudent) {
+                              subjectFreq.set(p.label, (subjectFreq.get(p.label) || 0) + 1);
+                        }
+                        if (!rawSubjectMap.has(p.label)) {
+                              rawSubjectMap.set(p.label, p);
+                        }
                   }
             });
       });
+
+      // Filter distinct subjects strictly matching the job's departmental curriculum
+      const subjectMap = new Map();
+      for (const [label, p] of rawSubjectMap.entries()) {
+            const count = subjectFreq.get(label) || 0;
+            if (count > 0 && isSubjectCompatibleWithBranch(p, jobBranch, count, sortedEnrollments.length)) {
+                  subjectMap.set(label, p);
+            }
+      }
 
       const theorySubs = [];
       const practicalSubs = [];
@@ -220,9 +318,17 @@ function analyzeResults(job, students = []) {
       let regularPass = 0;
       let passWithGrace = 0;
       let failedCount = 0;
+      let foreignBranchStudentsCount = 0;
 
       const processedStudents = sortedEnrollments.map((enr, idx) => {
             const s = studentMap.get(enr.toUpperCase());
+            const sBranch = getStudentActualBranch(s);
+            const isForeignBranch = sBranch && (
+                  (jobBranch === 'CSE' || jobBranch === 'CS') ? (sBranch !== 'CS' && sBranch !== 'CSE') : (sBranch !== jobBranch)
+            );
+
+            if (isForeignBranch) foreignBranchStudentsCount++;
+
             const studentGrades = new Map();
             let studentHasAbs = false;
             let studentHasGrace = false;
@@ -231,7 +337,8 @@ function analyzeResults(job, students = []) {
             if (s && s.subjects && s.subjects.length > 0) {
                   s.subjects.forEach(sub => {
                         const p = parseSubjectCode(sub.subjectCode);
-                        if (p) {
+                        // Only map grades for valid subjects that belong to this department's sheet
+                        if (p && subjectMap.has(p.label)) {
                               studentGrades.set(p.label, sub.grade || '');
                               if (isAbs(sub.grade)) studentHasAbs = true;
                               if (hasGrace(sub.grade)) studentHasGrace = true;
@@ -240,27 +347,31 @@ function analyzeResults(job, students = []) {
                   });
             }
 
-            // Update subject stats
-            allSubs.forEach(sub => {
-                  const grade = studentGrades.get(sub.label);
-                  if (grade != null && grade !== '') {
-                        if (isAbs(grade)) {
-                              subStats[sub.label].abs++;
-                        } else {
-                              subStats[sub.label].eligible++;
-                              if (isFail(grade)) {
-                                    subStats[sub.label].fail++;
+            // Update subject stats only for departmental students
+            if (!isForeignBranch) {
+                  allSubs.forEach(sub => {
+                        const grade = studentGrades.get(sub.label);
+                        if (grade != null && grade !== '') {
+                              if (isAbs(grade)) {
+                                    subStats[sub.label].abs++;
                               } else {
-                                    subStats[sub.label].pass++;
+                                    subStats[sub.label].eligible++;
+                                    if (isFail(grade)) {
+                                          subStats[sub.label].fail++;
+                                    } else {
+                                          subStats[sub.label].pass++;
+                                    }
                               }
                         }
-                  }
-            });
+                  });
+            }
 
             // Determine Result Decision
             let decision = '';
             if (s) {
-                  if (studentHasGrace || s.resultStatus === 'PASS WITH GRACE') {
+                  if (isForeignBranch) {
+                        decision = s.resultStatus ? `${s.resultStatus} (Branch: ${sBranch})` : `Branch: ${sBranch}`;
+                  } else if (studentHasGrace || s.resultStatus === 'PASS WITH GRACE') {
                         decision = 'PASS WITH GRACE';
                   } else if (s.resultStatus === 'PASS') {
                         decision = 'PASS';
@@ -273,18 +384,22 @@ function analyzeResults(job, students = []) {
                   }
             }
 
-            // Overall counts
-            if (studentHasAbs) {
-                  excludedDueToAbs++;
-            } else if (s && s.fetchStatus === 'completed') {
-                  if (decision === 'PASS WITH GRACE') {
-                        passWithGrace++;
-                  } else if (decision === 'PASS') {
-                        regularPass++;
-                  } else if (decision.startsWith('Fail') || decision === 'FAIL') {
-                        failedCount++;
+            // Overall counts for departmental students
+            if (!isForeignBranch) {
+                  if (studentHasAbs) {
+                        excludedDueToAbs++;
+                  } else if (s && s.fetchStatus === 'completed') {
+                        if (decision === 'PASS WITH GRACE') {
+                              passWithGrace++;
+                        } else if (decision === 'PASS') {
+                              regularPass++;
+                        } else if (decision.startsWith('Fail') || decision === 'FAIL') {
+                              failedCount++;
+                        }
                   }
             }
+
+            const categoryLabel = isForeignBranch ? `Branch: ${sBranch}` : 'Regular';
 
             return {
                   sno: idx + 1,
@@ -295,14 +410,15 @@ function analyzeResults(job, students = []) {
                   cgpa: s && s.cgpa != null && !isNaN(Number(s.cgpa)) ? Number(s.cgpa) : null,
                   backlogs: s && s.backlogs != null && !isNaN(Number(s.backlogs)) ? parseInt(s.backlogs, 10) : (failedInSubs.length || 0),
                   resultDecision: decision,
-                  category: 'Regular',
+                  category: categoryLabel,
                   hasAbs: studentHasAbs ? 'YES' : 'NO',
                   rawResultStatus: s ? s.resultStatus : '',
                   studentObj: s,
+                  isForeignBranch,
             };
       });
 
-      const eligibleOverall = Math.max(0, totalRoster - excludedDueToAbs);
+      const eligibleOverall = Math.max(0, totalRoster - excludedDueToAbs - foreignBranchStudentsCount);
       const totalPassed = regularPass + passWithGrace;
       const passPct = eligibleOverall > 0 ? ((totalPassed / eligibleOverall) * 100).toFixed(2) : '0.00';
       const failPct = eligibleOverall > 0 ? ((failedCount / eligibleOverall) * 100).toFixed(2) : '0.00';

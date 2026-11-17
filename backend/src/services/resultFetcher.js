@@ -20,8 +20,8 @@ const RETRY_DELAY_MS = 2500;
 const MAX_RETRIES = 3;
 const MAX_CAPTCHA_RETRIES = 5;
 
-// Default configurable via MAX_PARALLEL_TABS env var (default: 50)
-const MAX_PARALLEL_TABS = parseInt(process.env.MAX_PARALLEL_TABS || '50', 10);
+// Default configurable via MAX_PARALLEL_TABS env var (default: 100)
+const MAX_PARALLEL_TABS = parseInt(process.env.MAX_PARALLEL_TABS || '100', 10);
 // Configurable via HEADLESS_BROWSER env var (default: true)
 const isHeadless = process.env.HEADLESS_BROWSER !== 'false';
 
@@ -275,6 +275,8 @@ class ResultFetcherService {
                   const studentName = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblNameGrading')
                         || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblName');
                   const rollNo = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblRollNoGrading') || enrollment;
+                  const branchText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblBranchGrading')
+                        || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblBranch');
                   const resultText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblResultNewGrading')
                         || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblResult');
                   const sgpaText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblSGPA')
@@ -300,9 +302,19 @@ class ResultFetcherService {
                   const backlogs = subjects.filter(s => s.grade === 'F' || s.grade === 'FF').length;
                   const totalCredits = subjects.reduce((s, sub) => s + (sub.credits || 0), 0) || null;
 
+                  let detectedBranch = branchText ? branchText.trim().toUpperCase() : null;
+                  if (!detectedBranch && subjects && subjects.length > 0) {
+                        for (const sub of subjects) {
+                              const m = String(sub.subjectCode || '').match(/Branch\s*[:\t]?\s*([A-Za-z]+)/i);
+                              if (m) { detectedBranch = m[1].trim().toUpperCase(); break; }
+                              if (sub.subjectCode === 'Course' && sub.grade) { detectedBranch = String(sub.grade).trim().toUpperCase(); break; }
+                        }
+                  }
+
                   return {
                         studentName: studentName || '',
                         enrollmentNumber: rollNo || enrollment,
+                        ...(detectedBranch ? { branch: detectedBranch } : {}),
                         sgpa,
                         cgpa,
                         resultStatus,

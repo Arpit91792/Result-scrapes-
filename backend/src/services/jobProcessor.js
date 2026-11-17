@@ -39,7 +39,7 @@ class JobProcessor {
                   currentEnrollment: job.currentEnrollment,
                   progress: pct,
                   activeTabsCount: extra.activeTabsCount || 0,
-                  maxTabs: extra.maxTabs || parseInt(process.env.MAX_PARALLEL_TABS || '50', 10),
+                  maxTabs: extra.maxTabs || parseInt(process.env.MAX_PARALLEL_TABS || '100', 10),
                   processingCount: extra.processingCount || 0,
                   tabs: extra.tabs || [],
                   ...extra,

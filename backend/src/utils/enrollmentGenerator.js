@@ -85,7 +85,7 @@ function validateEnrollment(enrollment) {
       if (!enrollment || typeof enrollment !== 'string') return false;
       const trimmed = enrollment.trim();
       if (trimmed.length < 4 || trimmed.length > 20) return false;
-      return /^[A-Z0-9]+\d{4,8}$/.test(trimmed.toUpperCase());
+      return /^[A-Z0-9]+\d{1,8}$/.test(trimmed.toUpperCase());
 }
 
 /**
