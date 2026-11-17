@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BarChart3, Clock, CheckCircle, XCircle, PauseCircle, Users, Download, ArrowRight } from 'lucide-react';
+import { BarChart3, Clock, CheckCircle, XCircle, PauseCircle, Users, Download, ArrowRight, Layers } from 'lucide-react';
 import api from '../services/api';
 
 function JobCard({ job }) {
@@ -26,9 +26,16 @@ function JobCard({ job }) {
                                     {job.dataSource === 'demo' && <span className="ml-1 text-amber-500">[DEMO]</span>}
                               </p>
                         </div>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${statusColors[job.status] || 'bg-gray-100 text-gray-600'}`}>
-                              {job.status}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                              {job.status === 'running' && (
+                                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 border border-blue-200 flex items-center gap-1">
+                                          <Layers className="w-3 h-3" /> {job.maxTabs || 50} Tabs
+                                    </span>
+                              )}
+                              <span className={`text-xs px-2 py-0.5 rounded-full font-medium capitalize ${statusColors[job.status] || 'bg-gray-100 text-gray-600'}`}>
+                                    {job.status}
+                              </span>
+                        </div>
                   </div>
 
                   <div className="mb-2">

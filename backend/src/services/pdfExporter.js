@@ -88,6 +88,18 @@ function parseStudentMarksheetData(student, job) {
       };
 }
 
+function getDepartmentName(branch) {
+      if (!branch) return 'DEPARTMENT OF COMPUTER SCIENCE & ENGINEERING';
+      const b = branch.trim().toUpperCase();
+      if (b === 'CSE' || b === 'CS') return 'DEPARTMENT OF COMPUTER SCIENCE & ENGINEERING';
+      if (b === 'IT') return 'DEPARTMENT OF INFORMATION TECHNOLOGY';
+      if (b === 'ME') return 'DEPARTMENT OF MECHANICAL ENGINEERING';
+      if (b === 'CE') return 'DEPARTMENT OF CIVIL ENGINEERING';
+      if (b === 'EC' || b === 'ECE') return 'DEPARTMENT OF ELECTRONICS & COMMUNICATION ENGINEERING';
+      if (b === 'EE' || b === 'EX') return 'DEPARTMENT OF ELECTRICAL & ELECTRONICS ENGINEERING';
+      return `DEPARTMENT OF ${branch.toUpperCase()}`;
+}
+
 /**
  * Generate an individual student's Statement of Marks PDF matching the official format
  */
@@ -109,7 +121,7 @@ function generateStudentPDF(student, outputPath, job = null) {
             const borderColor = '#666666';
             const headerBg = '#E0E0E0';
             const pageHeight = doc.page.height;
-            let curY = 40;
+            let curY = 32;
 
             // Helper to draw cells with border and centered text
             function drawCell(x, y, w, h, bg, text, isBold = false, align = 'center', fontSize = 9.5) {
@@ -131,6 +143,41 @@ function generateStudentPDF(student, outputPath, job = null) {
                         });
                   }
             }
+
+            // ── Section 0: SIRT Institutional Header & Logo ──────────────────────────
+            const logoCandidates = [
+                  path.join(__dirname, '../assets/sirt_logo.png'),
+                  path.join(__dirname, '../../assets/sirt_logo.png'),
+                  path.join(process.cwd(), 'assets/sirt_logo.png'),
+                  path.join(process.cwd(), 'backend/assets/sirt_logo.png')
+            ];
+            const logoPath = logoCandidates.find(p => fs.existsSync(p));
+            let hasLogo = !!logoPath;
+            if (hasLogo) {
+                  try {
+                        doc.image(logoPath, startX, curY - 2, { width: 44, height: 42 });
+                  } catch {
+                        hasLogo = false;
+                  }
+            }
+
+            const headerTextX = hasLogo ? startX + 50 : startX;
+            const headerTextW = hasLogo ? tableWidth - 50 : tableWidth;
+
+            doc.font('Helvetica-Bold').fontSize(12).fillColor('#1F3864')
+               .text('SAGAR INSTITUTE OF RESEARCH & TECHNOLOGY, BHOPAL', headerTextX, curY + 4, {
+                     width: headerTextW,
+                     align: 'center'
+               });
+
+            const deptName = getDepartmentName(info.branch);
+            doc.font('Helvetica-Bold').fontSize(9).fillColor('#333333')
+               .text(deptName, headerTextX, curY + 22, {
+                     width: headerTextW,
+                     align: 'center'
+               });
+
+            curY += 46;
 
             // ── Section A: Main Heading ──────────────────────────────────────────────
             drawCell(startX, curY, tableWidth, 22, headerBg, `Statement of Marks - ${info.session}-${info.year}`, true, 'center', 10.5);

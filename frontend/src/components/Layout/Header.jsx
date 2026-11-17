@@ -24,10 +24,10 @@ export default function Header({ onMenuClick }) {
                         </button>
                         <div>
                               <h1 className="text-sm font-semibold text-gray-800 dark:text-gray-200 hidden md:block">
-                                    RGPV Smart Bulk Result Manager
+                                    SIRT Smart Bulk Result Manager
                               </h1>
                               <p className="text-xs text-gray-500 dark:text-gray-400 hidden md:block">
-                                    Rajiv Gandhi Proudyogiki Vishwavidyalaya, Bhopal
+                                    Sagar Institute of Research & Technology, Bhopal
                               </p>
                         </div>
                   </div>

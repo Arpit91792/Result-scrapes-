@@ -19,11 +19,11 @@ export default function HomePage() {
                   {/* Hero */}
                   <div className="card bg-gradient-to-br from-navy-700 to-navy-900 text-white border-0">
                         <div className="flex flex-col md:flex-row items-center gap-6">
-                              <div className="bg-white/10 p-4 rounded-2xl">
-                                    <GraduationCap className="w-16 h-16 text-white" />
+                              <div className="bg-white/10 p-3 rounded-2xl flex items-center justify-center">
+                                    <img src="/sirt_logo.png" alt="SIRT Logo" className="w-16 h-16 object-contain" />
                               </div>
                               <div>
-                                    <h1 className="text-3xl font-bold">RGPV Smart Bulk Result Manager</h1>
+                                    <h1 className="text-3xl font-bold">SIRT Smart Bulk Result Manager</h1>
                                     <p className="text-white/70 mt-2 text-lg">
                                           Fetch, analyze, and export examination results for entire college batches from official RGPV sources.
                                     </p>

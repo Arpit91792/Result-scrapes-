@@ -4,12 +4,13 @@ import {
       Users, CheckCircle, XCircle, Clock, AlertTriangle, AlertCircle,
       Download, Pause, Play, StopCircle, RefreshCw, Search,
       ChevronUp, ChevronDown, Eye, Wifi, WifiOff, Terminal,
-      FileSpreadsheet, Archive, ExternalLink, Loader2, ScanLine, Brain
+      FileSpreadsheet, Archive, ExternalLink, Loader2, ScanLine, Brain,
+      Layers, Monitor, Activity
 } from 'lucide-react';
 import api from '../services/api';
 import {
       joinJobRoom, leaveJobRoom, onProgress, onLog,
-      onJobCompleted, onCaptchaRequired, onCaptchaStatus,
+      onJobCompleted, onCaptchaRequired, onCaptchaStatus, onTabsStatus,
       resolveCaptcha, getSocket
 } from '../services/socket';
 import toast from 'react-hot-toast';
@@ -85,6 +86,25 @@ function FetchBadge({ status }) {
       );
 }
 
+function TabStatusBadge({ status }) {
+      const configs = {
+            Processing: { cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200', icon: <Loader2 className="w-3 h-3 animate-spin mr-1" /> },
+            Completed: { cls: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300 border-green-200', icon: <CheckCircle className="w-3 h-3 mr-1" /> },
+            'CAPTCHA Required': { cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 border-purple-200', icon: <AlertTriangle className="w-3 h-3 mr-1" /> },
+            'Network Error': { cls: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 border-red-200', icon: <XCircle className="w-3 h-3 mr-1" /> },
+            'Not Found': { cls: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300 border-orange-200', icon: <AlertCircle className="w-3 h-3 mr-1" /> },
+            Failed: { cls: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 border-red-200', icon: <XCircle className="w-3 h-3 mr-1" /> },
+            Waiting: { cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 border-gray-200', icon: <Clock className="w-3 h-3 mr-1" /> },
+      };
+      const cfg = configs[status] || configs.Waiting;
+      return (
+            <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border ${cfg.cls}`}>
+                  {cfg.icon}
+                  {status}
+            </span>
+      );
+}
+
 /* ── Stat card ─────────────────────────────────────────────────────────────── */
 function StatCard({ icon: Icon, label, value, color }) {
       return (
@@ -109,6 +129,7 @@ export default function AllResultsPage() {
       const [page, setPage] = useState(1);
       const [loading, setLoading] = useState(true);
       const [progress, setProgress] = useState(null);
+      const [tabs, setTabs] = useState([]);
       const [logs, setLogs] = useState([]);
       const [captchaState, setCaptchaState] = useState(null);  // OCR status
       const [manualAlert, setManualAlert] = useState(false); // manual fallback
@@ -161,8 +182,21 @@ export default function AllResultsPage() {
 
             const offProg = onProgress(data => {
                   if (String(data.jobId) !== String(jobId)) return;
-                  setProgress(data);
+                  setProgress(prev => ({ ...prev, ...data }));
                   setJob(j => j ? { ...j, ...data } : j);
+                  if (data.tabs && Array.isArray(data.tabs) && data.tabs.length > 0) {
+                        setTabs(data.tabs);
+                  }
+            });
+
+            const offTabs = onTabsStatus(data => {
+                  if (String(data.jobId) !== String(jobId)) return;
+                  if (data.tabs && Array.isArray(data.tabs)) {
+                        setTabs(data.tabs);
+                  }
+                  if (data.progressStats) {
+                        setProgress(prev => ({ ...prev, ...data.progressStats }));
+                  }
             });
 
             const offLog = onLog(data => {
@@ -206,7 +240,7 @@ export default function AllResultsPage() {
 
             return () => {
                   leaveJobRoom(jobId);
-                  offProg(); offLog(); offDone(); offCaptchaStatus(); offCaptchaReq();
+                  offProg(); offTabs(); offLog(); offDone(); offCaptchaStatus(); offCaptchaReq();
                   socket.off('connect', onConn);
                   socket.off('disconnect', onDisc);
                   clearInterval(pollRef.current);
@@ -388,14 +422,49 @@ export default function AllResultsPage() {
                         </div>
                   )}
 
+                  {/* ── Active Chrome Tabs & Overall Progress Banner ── */}
+                  <div className="bg-gradient-to-r from-slate-900 via-navy-900 to-slate-900 text-white rounded-xl p-4 shadow-md border border-slate-700/60 flex flex-wrap items-center justify-between gap-4">
+                        <div className="flex items-center gap-3">
+                              <div className="p-2.5 bg-blue-500/20 text-blue-400 rounded-lg border border-blue-400/30 flex-shrink-0">
+                                    <Layers className="w-5 h-5" />
+                              </div>
+                              <div>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                          <h2 className="text-sm font-semibold tracking-wide uppercase text-slate-200">
+                                                Active Browser Tabs (Headless Background)
+                                          </h2>
+                                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-400/40">
+                                                Active Tabs: {p?.activeTabsCount ?? (tabs.length || (p?.status === 'running' ? (p?.maxTabs || 50) : 0))} / {p?.maxTabs || 50}
+                                          </span>
+                                    </div>
+                                    <p className="text-xs text-slate-400 mt-1">
+                                          Operating {p?.maxTabs || 50} concurrent tabs in the background with automatic tab reuse upon student completion.
+                                    </p>
+                              </div>
+                        </div>
+
+                        <div className="flex items-center gap-6">
+                              <div className="text-right">
+                                    <p className="text-xs text-slate-400 font-medium">Overall Progress</p>
+                                    <p className="text-base font-bold text-white font-mono">
+                                          {Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} / {p?.totalStudents ?? 0}
+                                    </p>
+                              </div>
+                              <div className="text-right">
+                                    <p className="text-xs text-slate-400 font-medium">Completion Rate</p>
+                                    <p className="text-base font-bold text-emerald-400 font-mono">{pct}%</p>
+                              </div>
+                        </div>
+                  </div>
+
                   {/* ── Progress bar ── */}
                   <div className="card">
                         <div className="flex items-center justify-between mb-2">
                               <div className="flex items-center gap-3 flex-wrap">
-                                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Progress</span>
+                                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Overall Progress</span>
                                     {p?.currentEnrollment && p?.status === 'running' && (
                                           <span className="font-mono text-xs text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">
-                                                → {p.currentEnrollment}
+                                                Active Queue: {p.currentEnrollment}
                                           </span>
                                     )}
                                     {captchaState?.status === 'solving' && (
@@ -409,7 +478,7 @@ export default function AllResultsPage() {
                                           </span>
                                     )}
                               </div>
-                              <span className="text-lg font-bold text-navy-700 dark:text-primary-400">{pct}%</span>
+                              <span className="text-lg font-bold text-navy-700 dark:text-primary-400 font-mono">{pct}%</span>
                         </div>
 
                         <div className="h-3 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
@@ -426,7 +495,7 @@ export default function AllResultsPage() {
                               />
                         </div>
                         <p className="text-xs text-gray-400 mt-1 text-right">
-                              {Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} / {p?.totalStudents ?? 0} processed
+                              Overall Progress: {Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} / {p?.totalStudents ?? 0}
                         </p>
 
                         <div className="flex flex-wrap gap-2 mt-3">
@@ -456,16 +525,17 @@ export default function AllResultsPage() {
                         </div>
                   </div>
 
-                  {/* ── Stats grid ── */}
-                  <div className="grid grid-cols-4 md:grid-cols-8 gap-2">
-                        <StatCard icon={Users} label="Total" value={p?.totalStudents} color="text-gray-600 dark:text-gray-300" />
-                        <StatCard icon={CheckCircle} label="Done" value={Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} color="text-blue-600" />
+                  {/* ── Nine Stats Grid ── */}
+                  <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2">
+                        <StatCard icon={Users} label="Total Students" value={p?.totalStudents} color="text-gray-700 dark:text-gray-300" />
+                        <StatCard icon={CheckCircle} label="Completed" value={Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} color="text-blue-600" />
+                        <StatCard icon={Loader2} label="Processing" value={p?.processingCount ?? (tabs.filter(t => t.status === 'Processing').length)} color="text-indigo-600" />
+                        <StatCard icon={Clock} label="Pending" value={Math.max(0, (p?.totalStudents ?? 0) - (p?.completedCount ?? 0))} color="text-yellow-600" />
                         <StatCard icon={CheckCircle} label="Passed" value={p?.passedCount} color="text-green-600" />
                         <StatCard icon={XCircle} label="Failed" value={p?.failedCount} color="text-red-600" />
-                        <StatCard icon={Clock} label="Pending" value={Math.max(0, (p?.totalStudents ?? 0) - (p?.completedCount ?? 0))} color="text-yellow-600" />
-                        <StatCard icon={AlertTriangle} label="Missing" value={p?.missingCount} color="text-orange-500" />
-                        <StatCard icon={ScanLine} label="CAPTCHA" value={p?.verificationRequiredCount} color="text-purple-600" />
-                        <StatCard icon={XCircle} label="Errors" value={p?.failedRequestsCount} color="text-red-400" />
+                        <StatCard icon={ScanLine} label="CAPTCHA Required" value={p?.verificationRequiredCount} color="text-purple-600" />
+                        <StatCard icon={AlertTriangle} label="Network Errors" value={p?.failedRequestsCount} color="text-red-500" />
+                        <StatCard icon={AlertCircle} label="Not Found" value={p?.missingCount} color="text-orange-500" />
                   </div>
 
                   {/* ── Export ── */}
@@ -627,28 +697,7 @@ export default function AllResultsPage() {
                         )}
                   </div>
 
-                  {/* ── Live Logs ── */}
-                  {logs.length > 0 && (
-                        <div className="card">
-                              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
-                                    <Terminal className="w-4 h-4" /> Live Logs
-                                    <span className="text-xs text-gray-400 font-normal ml-auto">{logs.length} entries</span>
-                              </h3>
-                              <div className="bg-gray-950 rounded-lg p-3 max-h-48 overflow-y-auto font-mono text-xs space-y-0.5">
-                                    {logs.map((log, i) => (
-                                          <div key={i} className={
-                                                log.level === 'error' ? 'text-red-400' :
-                                                      log.level === 'warn' ? 'text-yellow-300' :
-                                                            'text-green-400'
-                                          }>
-                                                <span className="text-gray-600">[{new Date(log.timestamp).toLocaleTimeString()}]</span>
-                                                {' '}{log.message}
-                                          </div>
-                                    ))}
-                                    <div ref={logsBottomRef} />
-                              </div>
-                        </div>
-                  )}
+
             </div>
       );
 }

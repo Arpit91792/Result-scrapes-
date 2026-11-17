@@ -1,7 +1,7 @@
 {
   "name": "rgpv-result-backend",
   "version": "1.0.0",
-  "description": "RGPV Smart Bulk Result Manager Backend",
+  "description": "SIRT Smart Bulk Result Manager Backend",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {

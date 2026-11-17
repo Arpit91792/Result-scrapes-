@@ -124,9 +124,22 @@ function hasGrace(grade) {
       return grade.includes('*') || grade.includes('##') || grade.includes('$') || grade.toLowerCase().includes('grace');
 }
 
+function getLogoPath() {
+      const candidates = [
+            path.join(__dirname, '../assets/sirt_logo.png'),
+            path.join(__dirname, '../../assets/sirt_logo.png'),
+            path.join(process.cwd(), 'assets/sirt_logo.png'),
+            path.join(process.cwd(), 'backend/assets/sirt_logo.png')
+      ];
+      for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
+      }
+      return null;
+}
+
 function addLogo(workbook, worksheet, col = 0.1, row = 0.1) {
-      const logoPath = path.join(__dirname, '../assets/sirt_logo.png');
-      if (fs.existsSync(logoPath)) {
+      const logoPath = getLogoPath();
+      if (logoPath) {
             try {
                   const imgId = workbook.addImage({ filename: logoPath, extension: 'png' });
                   worksheet.addImage(imgId, {
@@ -457,6 +470,8 @@ function buildTotalStudentsSheet(workbook, job, analysis) {
             pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
       });
 
+      addLogo(workbook, ws, 0.05, 0.02);
+
       const totalCols = 3 + analysis.allSubs.length + 5; // SNo, Roll, Name + subs + SGPA, CGPA, Result, Category, ABS
       const lastColLetter = ws.getColumn(totalCols).letter;
 
@@ -467,7 +482,7 @@ function buildTotalStudentsSheet(workbook, job, analysis) {
       cTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_BLUE } };
       cTitle.font = { name: 'Calibri', size: 13, bold: true, color: { argb: 'FFFFFFFF' } };
       cTitle.alignment = { horizontal: 'center', vertical: 'middle' };
-      ws.getRow(1).height = 30;
+      ws.getRow(1).height = 36;
 
       ws.getRow(2).height = 6; // Spacer
 

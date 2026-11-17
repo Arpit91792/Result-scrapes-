@@ -51,8 +51,14 @@ export function onCaptchaStatus(callback) {
       return () => s.off('captcha_status', callback);
 }
 
-export function resolveCaptcha(jobId) {
-      getSocket().emit('captcha_resolved', { jobId });
+export function onTabsStatus(callback) {
+      const s = getSocket();
+      s.on('tabs_status', callback);
+      return () => s.off('tabs_status', callback);
+}
+
+export function resolveCaptcha(jobId, tabId = null) {
+      getSocket().emit('captcha_resolved', { jobId, tabId });
 }
 
 export function disconnectSocket() {

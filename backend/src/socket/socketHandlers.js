@@ -27,12 +27,12 @@ function setupSocketHandlers(io) {
             });
 
             // User completed CAPTCHA manually — tell the fetcher to continue
-            socket.on('captcha_resolved', ({ jobId }) => {
-                  logger.info(`CAPTCHA resolved signal for job ${jobId}`);
+            socket.on('captcha_resolved', ({ jobId, tabId }) => {
+                  logger.info(`CAPTCHA resolved signal for job ${jobId}${tabId ? `, tab ${tabId}` : ''}`);
                   const fetcher = fetcherRegistry.get(String(jobId));
                   if (fetcher) {
-                        fetcher.resolveCaptchaWait();
-                        io.to(`job_${jobId}`).emit('captcha_resolved_ack', { jobId, message: 'Continuing after CAPTCHA' });
+                        fetcher.resolveCaptchaWait(tabId || null);
+                        io.to(`job_${jobId}`).emit('captcha_resolved_ack', { jobId, tabId, message: 'Continuing after CAPTCHA' });
                   } else {
                         socket.emit('captcha_resolved_ack', { jobId, message: 'No active fetcher found' });
                   }

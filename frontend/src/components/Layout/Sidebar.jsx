@@ -37,11 +37,11 @@ export default function Sidebar({ open, onClose }) {
                         {/* Logo */}
                         <div className="flex items-center justify-between p-4 border-b border-navy-800">
                               <div className="flex items-center gap-3">
-                                    <div className="bg-white/10 p-2 rounded-lg">
-                                          <GraduationCap className="w-6 h-6 text-white" />
+                                    <div className="bg-white/10 p-1.5 rounded-lg flex items-center justify-center">
+                                          <img src="/sirt_logo.png" alt="SIRT Logo" className="w-8 h-8 object-contain" />
                                     </div>
                                     <div>
-                                          <p className="text-white font-bold text-sm leading-tight">RGPV Smart</p>
+                                          <p className="text-white font-bold text-sm leading-tight">SIRT Smart</p>
                                           <p className="text-white/60 text-xs">Result Manager</p>
                                     </div>
                               </div>
@@ -74,7 +74,7 @@ export default function Sidebar({ open, onClose }) {
 
                         {/* Footer */}
                         <div className="p-4 border-t border-navy-800 text-center">
-                              <p className="text-white/40 text-xs">RGPV Smart Result Manager v1.0</p>
+                              <p className="text-white/40 text-xs">SIRT Smart Result Manager v1.0</p>
                               <p className="text-white/30 text-[10px] mt-0.5">by Arpit Tripathi</p>
                         </div>
                   </aside>

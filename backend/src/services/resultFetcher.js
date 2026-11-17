@@ -1,50 +1,30 @@
 /**
- * RGPV Result Fetcher Service
+ * SIRT / RGPV Multi-Tab Result Fetcher Service
+ *
+ * Launches ONE Chromium browser window and manages up to MAX_PARALLEL_TABS
+ * concurrent tabs (pages in the same BrowserContext) processing students
+ * simultaneously in a worker-pool queue.
  *
  * Portal: https://result.rgpv.ac.in/Result/ProgramSelect.aspx
- *
- * CAPTCHA AUTO-SOLVE APPROACH:
- *   The RGPV portal uses a simple distorted alphanumeric text CAPTCHA.
- *   From the screenshot we can see it renders text like "UFET9" in
- *   a fixed-width image with mild distortion.
- *
- *   Auto-solve flow:
- *     1. Detect the CAPTCHA image element on page
- *     2. Take a Playwright screenshot of just that element
- *     3. Preprocess with Jimp (greyscale → contrast → binarise → scale 3x)
- *     4. Run Tesseract.js OCR with whitelist "A-Z0-9"
- *     5. Fill the cleaned OCR text into the CAPTCHA input
- *     6. Submit form
- *     7. If alert says "wrong text" → retry OCR up to MAX_CAPTCHA_RETRIES times
- *     8. If OCR repeatedly fails → pause and notify user for manual solve
- *
- * VERIFIED FORM SELECTORS (from live portal HTML):
- *   Enrollment:  input[name="ctl00$ContentPlaceHolder1$txtrollno"]
- *   Semester:    select[name="ctl00$ContentPlaceHolder1$drpSemester"]
- *   CAPTCHA img: #ctl00_ContentPlaceHolder1_pnlCaptcha img  (or table/tr/td/div/img)
- *   CAPTCHA inp: input[name="ctl00$ContentPlaceHolder1$TextBox1"]
- *   Submit btn:  input[name="ctl00$ContentPlaceHolder1$btnviewresult"]
- *   Reset btn:   #ctl00_ContentPlaceHolder1_btnReset
- *   Name:        #ctl00_ContentPlaceHolder1_lblNameGrading
- *   Roll:        #ctl00_ContentPlaceHolder1_lblRollNoGrading
- *   Result:      #ctl00_ContentPlaceHolder1_lblResultNewGrading
- *   SGPA:        #ctl00_ContentPlaceHolder1_lblSGPA
- *   CGPA:        #ctl00_ContentPlaceHolder1_lblcgpa
  */
 
 const { chromium } = require('playwright');
 const logger = require('../utils/logger');
 const { getDirectUrl, getRgpvLabel } = require('../utils/rgpvCourseMap');
-const { solveCaptchaFromElement, terminateWorker } = require('./captchaSolver');
+const { solveCaptchaFromElement } = require('./captchaSolver');
 
 const PROGRAM_SELECT_URL = 'https://result.rgpv.ac.in/Result/ProgramSelect.aspx';
-const PAGE_TIMEOUT = 30000;
+const PAGE_TIMEOUT = 35000;
 const CAPTCHA_WAIT_MS = 180000; // 3 min manual fallback
 const RETRY_DELAY_MS = 2500;
 const MAX_RETRIES = 3;
-const MAX_CAPTCHA_RETRIES = 5;  // attempts before falling back to manual
+const MAX_CAPTCHA_RETRIES = 5;
 
-// Selectors for the CAPTCHA image — try in order until one works
+// Default configurable via MAX_PARALLEL_TABS env var (default: 50)
+const MAX_PARALLEL_TABS = parseInt(process.env.MAX_PARALLEL_TABS || '50', 10);
+// Configurable via HEADLESS_BROWSER env var (default: true)
+const isHeadless = process.env.HEADLESS_BROWSER !== 'false';
+
 const CAPTCHA_IMG_SELECTORS = [
       '#ctl00_ContentPlaceHolder1_pnlCaptcha img',
       'img[src*="CaptchaImage"]',
@@ -58,12 +38,14 @@ class ResultFetcherService {
             this.io = io;
             this.browser = null;
             this.context = null;
-            this.page = null;
             this.isPaused = false;
             this.isCancelled = false;
-            this.captchaResolveCallback = null;
-            this._currentUrl = null;
-            this._lastAlert = null;
+            this._resolvedEntryUrl = null;
+
+            // Worker tabs registry: array of { tabId, tabName, page, enrollmentNumber, status, message }
+            this.tabs = [];
+            this.captchaResolvers = new Map(); // tabId -> resolve function
+            this.maxTabs = MAX_PARALLEL_TABS;
       }
 
       // ── Logging ───────────────────────────────────────────────────────────────────
@@ -86,52 +68,81 @@ class ResultFetcherService {
             }
       }
 
-      emitCaptchaRequired(jobId) {
+      emitCaptchaRequired(jobId, tabId = 1, enrollment = '') {
             if (this.io) {
                   this.io.to(`job_${jobId}`).emit('captcha_required', {
                         jobId,
-                        message: 'Auto OCR failed after multiple attempts. Please solve the CAPTCHA in the browser window, then click Resume.',
+                        tabId,
+                        enrollment,
+                        message: `Tab ${tabId} (${enrollment}): Auto OCR failed after multiple attempts. Please verify CAPTCHA in browser window, or click Resume.`,
                         timestamp: new Date().toISOString(),
                   });
             }
       }
 
-      resolveCaptchaWait() {
-            if (this.captchaResolveCallback) {
-                  this.captchaResolveCallback(true);
-                  this.captchaResolveCallback = null;
+      resolveCaptchaWait(tabId = null) {
+            if (tabId && this.captchaResolvers.has(tabId)) {
+                  const cb = this.captchaResolvers.get(tabId);
+                  cb(true);
+            } else {
+                  for (const [, cb] of this.captchaResolvers.entries()) {
+                        cb(true);
+                  }
             }
       }
 
-      // ── Browser lifecycle ─────────────────────────────────────────────────────────
+      // ── Browser & Context Lifecycle ───────────────────────────────────────────────
+      /**
+       * Launch ONE Chromium browser instance in headless mode.
+       * Runs completely in the background without displaying a desktop window or taskbar icon.
+       */
       async launchBrowser() {
-            this.log('system', 'Launching Chromium browser');
+            const headlessMode = process.env.HEADLESS_BROWSER !== 'false';
+            this.log('system', `Launching Chromium browser (headless=${headlessMode}, up to ${this.maxTabs} background tabs)`);
             this.browser = await chromium.launch({
-                  headless: false,  // headed so user can monitor / manually solve if OCR fails
-                  args: ['--no-sandbox', '--disable-setuid-sandbox', '--start-maximized'],
-                  timeout: 30000,
+                  headless: headlessMode,  // Headless: no window on desktop, no icon in taskbar
+                  args: [
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-gpu',
+                        '--no-first-run',
+                        '--no-default-browser-check',
+                  ],
+                  timeout: 45000,
             });
-            this.context = await this.browser.newContext({ viewport: null });
-            this.page = await this.context.newPage();
-            this.page.setDefaultTimeout(PAGE_TIMEOUT);
-            logger.info('Browser launched');
-            return this.page;
+            // Single context guarantees all new pages run in the exact same Chromium instance
+            this.context = await this.browser.newContext({ viewport: { width: 1280, height: 800 } });
+            logger.info(`Chromium browser launched (headless=${headlessMode})`);
+            return this.context;
       }
 
       async closeBrowser() {
             try {
-                  if (this.browser) {
-                        await this.browser.close();
-                        this.browser = null; this.context = null; this.page = null;
+                  for (const tab of this.tabs) {
+                        if (tab.page && !tab.page.isClosed()) {
+                              await tab.page.close().catch(() => { });
+                        }
                   }
-            } catch (e) { logger.warn('Browser close:', e.message); }
+                  this.tabs = [];
+                  if (this.browser) {
+                        await this.browser.close().catch(() => { });
+                        this.browser = null;
+                        this.context = null;
+                  }
+            } catch (e) {
+                  logger.warn('Browser close:', e.message);
+            }
       }
 
-      async ensureBrowser() {
-            if (!this.browser || !this.page || this.page.isClosed()) {
-                  await this.closeBrowser();
-                  await this.launchBrowser();
-            }
+      setupDialogHandlerForPage(page, tabId) {
+            page._lastAlert = null;
+            page.removeAllListeners('dialog');
+            page.on('dialog', async (dialog) => {
+                  page._lastAlert = dialog.message();
+                  logger.info(`[Tab ${tabId}] [Dialog] "${dialog.message()}"`);
+                  await dialog.accept().catch(() => { });
+            });
       }
 
       // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -144,23 +155,17 @@ class ResultFetcherService {
 
       pause() { this.isPaused = true; }
       resume() { this.isPaused = false; }
-      stop() { this.isCancelled = true; this.isPaused = false; }
-
-      setupDialogHandler() {
-            if (!this.page) return;
-            this._lastAlert = null;
-            this.page.removeAllListeners('dialog');
-            this.page.on('dialog', async (dialog) => {
-                  this._lastAlert = dialog.message();
-                  logger.info(`[Dialog] "${dialog.message()}"`);
-                  await dialog.accept();
-            });
+      stop() {
+            this.isCancelled = true;
+            this.isPaused = false;
+            // Unblock any waiting resolvers
+            this.resolveCaptchaWait();
       }
 
-      // ── Check if result is displayed on page ──────────────────────────────────────
-      async isResultDisplayed() {
+      // ── Page Status & Inspection Helpers ──────────────────────────────────────────
+      async isResultDisplayed(page) {
             try {
-                  const el = await this.page.$(
+                  const el = await page.$(
                         '#ctl00_ContentPlaceHolder1_lblNameGrading, ' +
                         '#ctl00_ContentPlaceHolder1_lblName, ' +
                         '#ctl00_ContentPlaceHolder1_lblResultNewGrading, ' +
@@ -172,166 +177,36 @@ class ResultFetcherService {
             } catch { return false; }
       }
 
-      // ── Check if on result entry form ─────────────────────────────────────────────
-      async isOnEntryForm() {
+      async isOnEntryForm(page) {
             try {
-                  if (await this.isResultDisplayed()) return false;
-                  const rollInput = await this.page.$('input[name="ctl00$ContentPlaceHolder1$txtrollno"]');
+                  if (await this.isResultDisplayed(page)) return false;
+                  const rollInput = await page.$('input[name="ctl00$ContentPlaceHolder1$txtrollno"]');
                   return rollInput ? await rollInput.isVisible() : false;
             } catch { return false; }
       }
 
-      // ── Find CAPTCHA image element ────────────────────────────────────────────────
-      async findCaptchaImg() {
+      async findCaptchaImg(page) {
             for (const sel of CAPTCHA_IMG_SELECTORS) {
                   try {
-                        const el = await this.page.$(sel);
+                        const el = await page.$(sel);
                         if (el && await el.isVisible()) return el;
                   } catch { /* try next */ }
             }
             return null;
       }
 
-      // ── Check if CAPTCHA is visible ───────────────────────────────────────────────
-      async isCaptchaVisible() {
+      async isCaptchaVisible(page) {
             try {
-                  // Check the CAPTCHA panel
-                  const panel = await this.page.$('#ctl00_ContentPlaceHolder1_pnlCaptcha');
+                  const panel = await page.$('#ctl00_ContentPlaceHolder1_pnlCaptcha');
                   if (panel && await panel.isVisible()) return true;
-                  // Check the input field
-                  const inp = await this.page.$('input[name="ctl00$ContentPlaceHolder1$TextBox1"]');
+                  const inp = await page.$('input[name="ctl00$ContentPlaceHolder1$TextBox1"]');
                   return inp ? await inp.isVisible() : false;
             } catch { return false; }
       }
 
-      // ── AUTO OCR CAPTCHA SOLVE ────────────────────────────────────────────────────
-      /**
-       * Automatically solve the CAPTCHA using Tesseract OCR.
-       *
-       * Returns:
-       *   { solved: true, text: 'UFET9' }   — OCR succeeded and form submitted
-       *   { solved: false, reason: '...' }  — OCR failed, caller decides what to do
-       */
-      async autoSolveCaptcha(jobId, enrollment) {
-            for (let attempt = 1; attempt <= MAX_CAPTCHA_RETRIES; attempt++) {
-                  this.log(jobId, `OCR CAPTCHA attempt ${attempt}/${MAX_CAPTCHA_RETRIES} for ${enrollment}`);
-                  this.emitCaptchaStatus(jobId, 'solving', `Attempt ${attempt}/${MAX_CAPTCHA_RETRIES}`);
-
-                  // Find the CAPTCHA image
-                  const captchaImg = await this.findCaptchaImg();
-                  if (!captchaImg) {
-                        this.log(jobId, 'CAPTCHA image element not found on page', 'warn');
-                        return { solved: false, reason: 'CAPTCHA image not found' };
-                  }
-
-                  // Run OCR on the element screenshot
-                  const ocrText = await solveCaptchaFromElement(captchaImg)
-                        || await solveCaptchaFromElement(this.page, CAPTCHA_IMG_SELECTORS);
-
-                  if (!ocrText || ocrText.length < 3) {
-                        this.log(jobId, `OCR returned empty/short text: "${ocrText}", retrying...`, 'warn');
-                        await this.delay(1000);
-                        // Refresh CAPTCHA image (sometimes reloading helps)
-                        await this._refreshCaptcha();
-                        continue;
-                  }
-
-                  this.log(jobId, `OCR result: "${ocrText}" — filling into CAPTCHA input`);
-                  this.emitCaptchaStatus(jobId, 'filling', ocrText);
-
-                  // Fill CAPTCHA input
-                  const captchaInput = await this.page.$('input[name="ctl00$ContentPlaceHolder1$TextBox1"]')
-                        || await this.page.$('#ctl00_ContentPlaceHolder1_TextBox1');
-                  if (!captchaInput) {
-                        this.log(jobId, 'CAPTCHA input not found on page', 'warn');
-                        return { solved: false, reason: 'CAPTCHA input not found' };
-                  }
-
-                  await captchaInput.click({ clickCount: 3 });
-                  await captchaInput.fill('');
-                  await captchaInput.type(ocrText, { delay: 60 });
-
-                  // Submit
-                  this._lastAlert = null;
-                  const submitBtn = await this.page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
-                  if (submitBtn) {
-                        await submitBtn.click();
-                        this.log(jobId, `Submitted with CAPTCHA="${ocrText}", waiting for portal response...`);
-
-                        // Wait up to 10 seconds for alert, result display, or form update
-                        const startWait = Date.now();
-                        while (Date.now() - startWait < 10000) {
-                              await this.delay(500);
-                              if (this._lastAlert) break;
-                              if (await this.isResultDisplayed()) break;
-                              if (!(await this.isOnEntryForm())) break;
-                        }
-                  }
-
-                  // Check if CAPTCHA was wrong
-                  if (this._lastAlert) {
-                        const alert = this._lastAlert;
-                        this.log(jobId, `Alert after CAPTCHA submit: "${alert}"`, 'warn');
-
-                        // "wrong text" means CAPTCHA was incorrect
-                        if (/wrong text/i.test(alert) || /invalid captcha/i.test(alert) || /wrong captcha/i.test(alert)) {
-                              this.log(jobId, `OCR CAPTCHA "${ocrText}" was wrong, retrying...`, 'warn');
-                              this.emitCaptchaStatus(jobId, 'wrong', ocrText);
-                              await this.delay(1200);
-                              // Refresh CAPTCHA image for next attempt
-                              await this._refreshCaptcha();
-                              continue;
-                         }
-
-                        // "not found" means CAPTCHA was correct but enrollment not found
-                        if (/not found/i.test(alert)) {
-                              return { solved: true, text: ocrText, alertText: alert };
-                        }
-                  }
-
-                  // If result is displayed or page navigated away from form → success
-                  if (await this.isResultDisplayed() || !(await this.isOnEntryForm())) {
-                        this.log(jobId, `✓ CAPTCHA solved with OCR text "${ocrText}"! Result page loaded.`);
-                        this.emitCaptchaStatus(jobId, 'solved', ocrText);
-                        return { solved: true, text: ocrText, alertText: this._lastAlert };
-                  }
-
-                  // Still on form after submit — CAPTCHA might have been wrong silently
-                  this.log(jobId, 'Still on entry form after submit, retrying CAPTCHA...', 'warn');
-                  await this._refreshCaptcha();
-            }
-
-            this.log(jobId, `OCR failed after ${MAX_CAPTCHA_RETRIES} attempts`, 'warn');
-            this.emitCaptchaStatus(jobId, 'failed', '');
-            return { solved: false, reason: `OCR failed after ${MAX_CAPTCHA_RETRIES} attempts` };
-      }
-
-      /**
-       * OCR directly from a Playwright element handle.
-       * Falls back when solveCaptchaFromElement can't find selector.
-       */
-      async _ocrFromElement(elementHandle, jobId) {
+      async _refreshCaptcha(page) {
             try {
-                  const { solveCaptchaFromElement } = require('./captchaSolver');
-                  const text = await solveCaptchaFromElement(elementHandle);
-                  if (text) {
-                        this.log(jobId, `Element OCR result: "${text}"`);
-                  }
-                  return text || null;
-            } catch (e) {
-                  logger.warn('_ocrFromElement:', e.message);
-                  return null;
-            }
-      }
-
-      /**
-       * Refresh the CAPTCHA image by clicking it or reloading the src.
-       * Some portals support this, some don't.
-       */
-      async _refreshCaptcha() {
-            try {
-                  // Try clicking the CAPTCHA image to refresh it
-                  const img = await this.findCaptchaImg();
+                  const img = await this.findCaptchaImg(page);
                   if (img) {
                         await img.click();
                         await this.delay(800);
@@ -339,302 +214,9 @@ class ResultFetcherService {
             } catch { /* ignore */ }
       }
 
-      /**
-       * Manual fallback: wait for user to solve CAPTCHA in the browser window.
-       * Automatically detects when the CAPTCHA is filled or submitted so the user
-       * does NOT need to switch back and click the "Resume" button every time!
-       */
-      async waitForManualCaptcha(jobId) {
-            this.log(jobId, 'Manual CAPTCHA assistance: please verify/solve CAPTCHA in browser window (auto-detecting submit...)', 'warn');
-            this.emitCaptchaRequired(jobId);
-
-            return new Promise((resolve) => {
-                  let isResolved = false;
-
-                  const cleanup = () => {
-                        isResolved = true;
-                        if (pollTimer) clearInterval(pollTimer);
-                        if (timeoutTimer) clearTimeout(timeoutTimer);
-                        this.captchaResolveCallback = null;
-                  };
-
-                  const timeoutTimer = setTimeout(() => {
-                        if (!isResolved) {
-                              cleanup();
-                              this.log(jobId, 'Manual CAPTCHA timed out after 3 minutes', 'warn');
-                              resolve(false);
-                        }
-                  }, CAPTCHA_WAIT_MS);
-
-                  // User clicked "Resume After Manual CAPTCHA" button on dashboard
-                  this.captchaResolveCallback = (solved) => {
-                        if (!isResolved) {
-                              cleanup();
-                              this.log(jobId, '✓ Resume signal received from dashboard button');
-                              resolve(solved);
-                        }
-                  };
-
-                  // Active poller in the browser: auto-detects when CAPTCHA is submitted or result loads
-                  let autoSubmitAttempted = false;
-                  const pollTimer = setInterval(async () => {
-                        if (isResolved || !this.page || this.page.isClosed()) {
-                              cleanup();
-                              return;
-                        }
-                        try {
-                              // 1. Result displayed or navigated away or alert shown
-                              if (await this.isResultDisplayed() || !(await this.isOnEntryForm()) || this._lastAlert) {
-                                    this.log(jobId, '✓ Auto-detected result/submission in browser window — resuming automatically!');
-                                    cleanup();
-                                    resolve(true);
-                                    return;
-                              }
-
-                              // 2. If CAPTCHA input has a 5-char value already filled and hasn't been submitted yet
-                              const captchaVal = await this.page.$eval(
-                                    'input[name="ctl00$ContentPlaceHolder1$TextBox1"], #ctl00_ContentPlaceHolder1_TextBox1',
-                                    el => (el.value || '').trim()
-                              ).catch(() => '');
-
-                              if (captchaVal.length === 5 && !autoSubmitAttempted) {
-                                    autoSubmitAttempted = true;
-                                    this.log(jobId, `Auto-submitting filled CAPTCHA "${captchaVal}" in browser...`);
-                                    const submitBtn = await this.page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
-                                    if (submitBtn) {
-                                          await submitBtn.click().catch(() => {});
-                                          const waitStart = Date.now();
-                                          while (Date.now() - waitStart < 5000) {
-                                                await this.delay(400);
-                                                if (await this.isResultDisplayed() || !(await this.isOnEntryForm()) || this._lastAlert) {
-                                                      this.log(jobId, '✓ Submission succeeded — resuming automatically!');
-                                                      cleanup();
-                                                      resolve(true);
-                                                      return;
-                                                }
-                                          }
-                                    }
-                              }
-                        } catch { /* ignore poll errors */ }
-                  }, 800);
-            });
-      }
-
-      // ── DYNAMIC PROGRAMME SELECTION ───────────────────────────────────────────────
-      async selectProgramme(jobConfig, jobId) {
-            const course = jobConfig.course;
-            const resultType = jobConfig.resultType || 'Main';
-            const rgpvLabel = getRgpvLabel(course);
-
-            if (!rgpvLabel) {
-                  this.log(jobId, `❌ No RGPV label mapping for course: "${course}"`, 'error');
-                  return { success: false, error: `Course "${course}" is not supported.` };
-            }
-
-            this.log(jobId, `🔍 ProgramSelect: Looking for "${rgpvLabel}" in "${resultType}" section`);
-
+      async getText(page, selector) {
             try {
-                  await this.page.goto(PROGRAM_SELECT_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
-                  await this.delay(1500);
-
-                  // Try section-aware click first, then broad scan
-                  let clicked = await this._clickProgrammeRadio(rgpvLabel, resultType, jobId);
-
-                  if (!clicked) {
-                        const available = await this._listAllRadioLabels();
-                        this.log(jobId,
-                              `❌ Programme "${rgpvLabel}" not found. Available: ${available.join(', ')}`, 'error'
-                        );
-                        return {
-                              success: false,
-                              error: `Programme "${course}" not found on RGPV page. Available: ${available.join(', ')}`,
-                        };
-                  }
-
-                  // Wait for navigation
-                  await this.delay(2500);
-
-                  if (!(await this.isOnEntryForm())) {
-                        await this.delay(2000);
-                        if (!(await this.isOnEntryForm())) {
-                              return { success: false, error: 'Programme selected but result form did not appear' };
-                        }
-                  }
-
-                  this._currentUrl = this.page.url();
-                  this.log(jobId, `✓ Programme selected successfully → ${this._currentUrl}`);
-                  return { success: true };
-
-            } catch (e) {
-                  this.log(jobId, `❌ Programme selection error: ${e.message}`, 'error');
-                  return { success: false, error: e.message };
-            }
-      }
-
-      async _clickProgrammeRadio(rgpvLabel, resultType, jobId) {
-            try {
-                  const clicked = await this.page.evaluate(({ label, resType }) => {
-                        const normalize = s => (s || '').replace(/\s+/g, ' ').trim();
-                        const clean = s => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-                        // Map section to RGPV's well-known ASP.NET table IDs
-                        let targetTable = null;
-                        if (resType === 'Main') {
-                              targetTable = document.getElementById('radlstProgram');
-                        } else if (resType === 'Revaluation') {
-                              targetTable = document.getElementById('radlstRevalProg');
-                        } else if (resType === 'Challenge') {
-                              targetTable = document.getElementById('ChallengeRbtnList');
-                        }
-
-                        // Fallback: scan table containers if ID was not found
-                        if (!targetTable) {
-                              const allTables = document.querySelectorAll('table');
-                              for (const table of allTables) {
-                                    const container = table.closest('div') || table.parentElement;
-                                    const prevEl = table.previousElementSibling;
-                                    const textBefore = ((prevEl ? prevEl.innerText : '') + ' ' + (container ? container.innerText : '')).toLowerCase();
-                                    const isMain = resType === 'Main' && textBefore.includes('main result');
-                                    const isReval = resType === 'Revaluation' && textBefore.includes('revaluation');
-                                    const isChal = resType === 'Challenge' && textBefore.includes('challenge');
-                                    if (isMain || isReval || isChal) {
-                                          targetTable = table;
-                                          break;
-                                    }
-                              }
-                        }
-
-                        // Radios to search: target table first, or section-named radios, or all radios
-                        let searchIn = [];
-                        if (targetTable) {
-                              searchIn = Array.from(targetTable.querySelectorAll('input[type="radio"]'));
-                        }
-                        if (searchIn.length === 0) {
-                              const groupName = resType === 'Revaluation' ? 'radlstRevalProg' : (resType === 'Challenge' ? 'ChallengeRbtnList' : 'radlstProgram');
-                              searchIn = Array.from(document.querySelectorAll(`input[type="radio"][name="${groupName}"]`));
-                        }
-                        if (searchIn.length === 0) {
-                              searchIn = Array.from(document.querySelectorAll('input[type="radio"]'));
-                        }
-
-                        const targetNorm = normalize(label);
-                        const targetClean = clean(label);
-
-                        const getRadioTexts = (radio) => {
-                              const td = radio.closest('td');
-                              const labelEl = (td && td.querySelector('label')) || document.querySelector(`label[for="${radio.id}"]`);
-                              const tdText = td ? normalize(td.innerText) : '';
-                              const labelText = labelEl ? normalize(labelEl.innerText) : '';
-                              return { tdText, labelText, primaryText: labelText || tdText };
-                        };
-
-                        // 1. Exact text match
-                        for (const radio of searchIn) {
-                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
-                              if (tdText === targetNorm || labelText === targetNorm) {
-                                    radio.click();
-                                    return { success: true, matched: primaryText, radioId: radio.id };
-                              }
-                        }
-
-                        // 2. Clean match (alphanumeric only: handles "B.Tech." vs "B.Tech", spacing, dots)
-                        for (const radio of searchIn) {
-                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
-                              if ((tdText && clean(tdText) === targetClean) || (labelText && clean(labelText) === targetClean)) {
-                                    radio.click();
-                                    return { success: true, matched: primaryText, radioId: radio.id };
-                              }
-                        }
-
-                        // 3. StartsWith match (safely check with word boundary/space)
-                        for (const radio of searchIn) {
-                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
-                              const matchText = labelText || tdText;
-                              if (matchText.startsWith(targetNorm + ' ') || matchText === targetNorm) {
-                                    radio.click();
-                                    return { success: true, matched: primaryText, radioId: radio.id };
-                              }
-                        }
-
-                        // 4. Whole-word boundary regex match
-                        const escaped = targetNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                        const regex = new RegExp('\\b' + escaped + '\\b', 'i');
-                        for (const radio of searchIn) {
-                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
-                              const matchText = labelText || tdText;
-                              if (regex.test(matchText)) {
-                                    radio.click();
-                                    return { success: true, matched: primaryText, radioId: radio.id };
-                              }
-                        }
-
-                        return { success: false };
-                  }, { label: rgpvLabel, resType: resultType });
-
-                  if (clicked && clicked.success) {
-                        this.log(jobId, `✓ Selected programme radio: "${clicked.matched}"`);
-                        return true;
-                  }
-            } catch (e) {
-                  logger.warn('_clickProgrammeRadio evaluate error:', e.message);
-                  this.log(jobId, `⚠ Error during programme selection: ${e.message}`, 'warn');
-            }
-            return false;
-      }
-
-      async _listAllRadioLabels() {
-            try {
-                  return await this.page.evaluate(() => {
-                        const labels = new Set();
-                        document.querySelectorAll('input[type="radio"]').forEach(r => {
-                              const td = r.closest('td');
-                              if (td) {
-                                    const t = td.innerText.trim().replace(/\s+/g, ' ');
-                                    if (t) labels.add(t);
-                              }
-                        });
-                        return [...labels];
-                  });
-            } catch { return []; }
-      }
-
-      // ── Navigate to result entry form ─────────────────────────────────────────────
-      async navigateToResultPage(jobConfig, jobId) {
-            const directUrl = getDirectUrl(jobConfig.course, jobConfig.resultMode || 'Grading');
-            this.log(jobId, `📚 Course: "${jobConfig.course}" | Mode: "${jobConfig.resultMode || 'Grading'}" | Type: "${jobConfig.resultType || 'Main'}"`);
-            this.log(jobId, `Trying direct URL: ${directUrl}`);
-
-            try {
-                  await this.page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
-                  await this.delay(1500);
-                  if (await this.isOnEntryForm()) {
-                        this._currentUrl = directUrl;
-                        this.log(jobId, `✓ Direct URL worked: ${directUrl}`);
-                        return { success: true };
-                  }
-            } catch (e) {
-                  this.log(jobId, `⚠ Direct URL failed: ${e.message}, trying ProgramSelect`, 'warn');
-            }
-
-            return await this.selectProgramme(jobConfig, jobId);
-      }
-
-      // ── Reset / navigate back ─────────────────────────────────────────────────────
-      async clickReset() {
-            try {
-                  const btn = await this.page.$('#ctl00_ContentPlaceHolder1_btnReset');
-                  if (btn && await btn.isVisible()) { await btn.click(); await this.delay(1200); return; }
-            } catch { /* ignore */ }
-            if (this._currentUrl) {
-                  await this.page.goto(this._currentUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT }).catch(() => { });
-                  await this.delay(1000);
-            }
-      }
-
-      // ── Element text helper ───────────────────────────────────────────────────────
-      async getText(selector) {
-            try {
-                  const el = await this.page.$(selector);
+                  const el = await page.$(selector);
                   if (!el) return null;
                   return (await el.innerText()).trim() || null;
             } catch { return null; }
@@ -646,8 +228,8 @@ class ResultFetcherService {
             return isNaN(n) ? null : n;
       }
 
-      // ── Scrape subjects ───────────────────────────────────────────────────────────
-      async scrapeSubjects() {
+      // ── Scrape result and subjects on a given page ────────────────────────────────
+      async scrapeSubjects(page) {
             const subjects = [];
             try {
                   for (const panelId of [
@@ -655,7 +237,7 @@ class ResultFetcherService {
                         '#ctl00_ContentPlaceHolder1_pnlshowRslt',
                         '#ctl00_ContentPlaceHolder1_GridView1',
                   ]) {
-                        const panel = await this.page.$(panelId);
+                        const panel = await page.$(panelId);
                         if (!panel) continue;
 
                         const rows = await panel.$$('table tbody tr, table tr');
@@ -682,22 +264,23 @@ class ResultFetcherService {
                         }
                         if (subjects.length > 0) break;
                   }
-            } catch (e) { logger.warn('scrapeSubjects:', e.message); }
+            } catch (e) {
+                  logger.warn('scrapeSubjects:', e.message);
+            }
             return subjects;
       }
 
-      // ── Scrape result page ────────────────────────────────────────────────────────
-      async scrapeResult(enrollment) {
+      async scrapeResult(page, enrollment) {
             try {
-                  const studentName = await this.getText('#ctl00_ContentPlaceHolder1_lblNameGrading')
-                        || await this.getText('#ctl00_ContentPlaceHolder1_lblName');
-                  const rollNo = await this.getText('#ctl00_ContentPlaceHolder1_lblRollNoGrading') || enrollment;
-                  const resultText = await this.getText('#ctl00_ContentPlaceHolder1_lblResultNewGrading')
-                        || await this.getText('#ctl00_ContentPlaceHolder1_lblResult');
-                  const sgpaText = await this.getText('#ctl00_ContentPlaceHolder1_lblSGPA')
-                        || await this.getText('#ctl00_ContentPlaceHolder1_lblsgpa');
-                  const cgpaText = await this.getText('#ctl00_ContentPlaceHolder1_lblcgpa')
-                        || await this.getText('#ctl00_ContentPlaceHolder1_lblCGPA');
+                  const studentName = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblNameGrading')
+                        || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblName');
+                  const rollNo = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblRollNoGrading') || enrollment;
+                  const resultText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblResultNewGrading')
+                        || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblResult');
+                  const sgpaText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblSGPA')
+                        || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblsgpa');
+                  const cgpaText = await this.getText(page, '#ctl00_ContentPlaceHolder1_lblcgpa')
+                        || await this.getText(page, '#ctl00_ContentPlaceHolder1_lblCGPA');
 
                   if (!studentName && !resultText) return null;
 
@@ -713,19 +296,380 @@ class ResultFetcherService {
 
                   const sgpa = this.parseFloat_(sgpaText);
                   const cgpa = this.parseFloat_(cgpaText);
-                  const subjects = await this.scrapeSubjects();
+                  const subjects = await this.scrapeSubjects(page);
                   const backlogs = subjects.filter(s => s.grade === 'F' || s.grade === 'FF').length;
                   const totalCredits = subjects.reduce((s, sub) => s + (sub.credits || 0), 0) || null;
 
                   return {
-                        studentName: studentName || '', enrollmentNumber: rollNo || enrollment,
-                        sgpa, cgpa, resultStatus, subjects, backlogs, totalCredits, rawResultText: resultText
+                        studentName: studentName || '',
+                        enrollmentNumber: rollNo || enrollment,
+                        sgpa,
+                        cgpa,
+                        resultStatus,
+                        subjects,
+                        backlogs,
+                        totalCredits,
+                        rawResultText: resultText,
                   };
-            } catch (e) { logger.error('scrapeResult:', e.message); return null; }
+            } catch (e) {
+                  logger.error('scrapeResult:', e.message);
+                  return null;
+            }
       }
 
-      // ── MAIN: fetch single result ─────────────────────────────────────────────────
-      async fetchSingleResult(enrollment, jobConfig, jobId) {
+      async clickReset(page) {
+            try {
+                  const btn = await page.$('#ctl00_ContentPlaceHolder1_btnReset');
+                  if (btn && await btn.isVisible()) {
+                        await btn.click();
+                        await this.delay(1000);
+                        return;
+                  }
+            } catch { /* ignore */ }
+            if (this._resolvedEntryUrl) {
+                  await page.goto(this._resolvedEntryUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT }).catch(() => { });
+                  await this.delay(800);
+            }
+      }
+
+      // ── Programme Navigation ──────────────────────────────────────────────────────
+      async selectProgramme(page, jobConfig, jobId) {
+            const course = jobConfig.course;
+            const resultType = jobConfig.resultType || 'Main';
+            const rgpvLabel = getRgpvLabel(course);
+
+            if (!rgpvLabel) {
+                  this.log(jobId, `❌ No RGPV label mapping for course: "${course}"`, 'error');
+                  return { success: false, error: `Course "${course}" is not supported.` };
+            }
+
+            this.log(jobId, `🔍 ProgramSelect: Looking for "${rgpvLabel}" in "${resultType}" section`);
+
+            try {
+                  await page.goto(PROGRAM_SELECT_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+                  await this.delay(1500);
+
+                  let clicked = await this._clickProgrammeRadio(page, rgpvLabel, resultType, jobId);
+                  if (!clicked) {
+                        const available = await this._listAllRadioLabels(page);
+                        return {
+                              success: false,
+                              error: `Programme "${course}" not found on RGPV page. Available: ${available.join(', ')}`,
+                        };
+                  }
+
+                  await this.delay(2500);
+                  if (!(await this.isOnEntryForm(page))) {
+                        await this.delay(2000);
+                        if (!(await this.isOnEntryForm(page))) {
+                              return { success: false, error: 'Programme selected but result form did not appear' };
+                        }
+                  }
+
+                  this._resolvedEntryUrl = page.url();
+                  this.log(jobId, `✓ Programme selected successfully → ${this._resolvedEntryUrl}`);
+                  return { success: true, url: this._resolvedEntryUrl };
+            } catch (e) {
+                  this.log(jobId, `❌ Programme selection error: ${e.message}`, 'error');
+                  return { success: false, error: e.message };
+            }
+      }
+
+      async _clickProgrammeRadio(page, rgpvLabel, resultType, jobId) {
+            try {
+                  const clicked = await page.evaluate(({ label, resType }) => {
+                        const normalize = s => (s || '').replace(/\s+/g, ' ').trim();
+                        const clean = s => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+                        let targetTable = null;
+                        if (resType === 'Main') {
+                              targetTable = document.getElementById('radlstProgram');
+                        } else if (resType === 'Revaluation') {
+                              targetTable = document.getElementById('radlstRevalProg');
+                        } else if (resType === 'Challenge') {
+                              targetTable = document.getElementById('ChallengeRbtnList');
+                        }
+
+                        if (!targetTable) {
+                              const allTables = document.querySelectorAll('table');
+                              for (const table of allTables) {
+                                    const container = table.closest('div') || table.parentElement;
+                                    const prevEl = table.previousElementSibling;
+                                    const textBefore = ((prevEl ? prevEl.innerText : '') + ' ' + (container ? container.innerText : '')).toLowerCase();
+                                    const isMain = resType === 'Main' && textBefore.includes('main result');
+                                    const isReval = resType === 'Revaluation' && textBefore.includes('revaluation');
+                                    const isChal = resType === 'Challenge' && textBefore.includes('challenge');
+                                    if (isMain || isReval || isChal) {
+                                          targetTable = table;
+                                          break;
+                                    }
+                              }
+                        }
+
+                        let searchIn = [];
+                        if (targetTable) {
+                              searchIn = Array.from(targetTable.querySelectorAll('input[type="radio"]'));
+                        }
+                        if (searchIn.length === 0) {
+                              const groupName = resType === 'Revaluation' ? 'radlstRevalProg' : (resType === 'Challenge' ? 'ChallengeRbtnList' : 'radlstProgram');
+                              searchIn = Array.from(document.querySelectorAll(`input[type="radio"][name="${groupName}"]`));
+                        }
+                        if (searchIn.length === 0) {
+                              searchIn = Array.from(document.querySelectorAll('input[type="radio"]'));
+                        }
+
+                        const targetNorm = normalize(label);
+                        const targetClean = clean(label);
+
+                        const getRadioTexts = (radio) => {
+                              const td = radio.closest('td');
+                              const labelEl = (td && td.querySelector('label')) || document.querySelector(`label[for="${radio.id}"]`);
+                              const tdText = td ? normalize(td.innerText) : '';
+                              const labelText = labelEl ? normalize(labelEl.innerText) : '';
+                              return { tdText, labelText, primaryText: labelText || tdText };
+                        };
+
+                        // 1. Exact match
+                        for (const radio of searchIn) {
+                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
+                              if (tdText === targetNorm || labelText === targetNorm) {
+                                    radio.click();
+                                    return { success: true, matched: primaryText };
+                              }
+                        }
+
+                        // 2. Clean match
+                        for (const radio of searchIn) {
+                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
+                              if ((tdText && clean(tdText) === targetClean) || (labelText && clean(labelText) === targetClean)) {
+                                    radio.click();
+                                    return { success: true, matched: primaryText };
+                              }
+                        }
+
+                        // 3. StartsWith match
+                        for (const radio of searchIn) {
+                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
+                              const matchText = labelText || tdText;
+                              if (matchText.startsWith(targetNorm + ' ') || matchText === targetNorm) {
+                                    radio.click();
+                                    return { success: true, matched: primaryText };
+                              }
+                        }
+
+                        // 4. Word boundary match
+                        const escaped = targetNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const regex = new RegExp('\\b' + escaped + '\\b', 'i');
+                        for (const radio of searchIn) {
+                              const { tdText, labelText, primaryText } = getRadioTexts(radio);
+                              const matchText = labelText || tdText;
+                              if (regex.test(matchText)) {
+                                    radio.click();
+                                    return { success: true, matched: primaryText };
+                              }
+                        }
+
+                        return { success: false };
+                  }, { label: rgpvLabel, resType: resultType });
+
+                  if (clicked && clicked.success) {
+                        this.log(jobId, `✓ Selected programme radio: "${clicked.matched}"`);
+                        return true;
+                  }
+            } catch (e) {
+                  logger.warn('_clickProgrammeRadio evaluate error:', e.message);
+            }
+            return false;
+      }
+
+      async _listAllRadioLabels(page) {
+            try {
+                  return await page.evaluate(() => {
+                        const labels = new Set();
+                        document.querySelectorAll('input[type="radio"]').forEach(r => {
+                              const td = r.closest('td');
+                              if (td) {
+                                    const t = td.innerText.trim().replace(/\s+/g, ' ');
+                                    if (t) labels.add(t);
+                              }
+                        });
+                        return [...labels];
+                  });
+            } catch { return []; }
+      }
+
+      async resolveInitialEntryUrl(page, jobConfig, jobId) {
+            const directUrl = getDirectUrl(jobConfig.course, jobConfig.resultMode || 'Grading');
+            this.log(jobId, `📚 Course: "${jobConfig.course}" | Mode: "${jobConfig.resultMode || 'Grading'}"`);
+            this.log(jobId, `Attempting direct URL: ${directUrl}`);
+
+            try {
+                  await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+                  await this.delay(1200);
+                  if (await this.isOnEntryForm(page)) {
+                        this._resolvedEntryUrl = directUrl;
+                        this.log(jobId, `✓ Direct URL active for all tabs: ${directUrl}`);
+                        return { success: true, url: directUrl };
+                  }
+            } catch (e) {
+                  this.log(jobId, `⚠ Direct URL check failed: ${e.message}, falling back to ProgramSelect`, 'warn');
+            }
+
+            const sel = await this.selectProgramme(page, jobConfig, jobId);
+            if (sel.success) {
+                  this._resolvedEntryUrl = sel.url;
+            }
+            return sel;
+      }
+
+      // ── CAPTCHA Solving on a Specific Tab ─────────────────────────────────────────
+      async autoSolveCaptchaOnTab(page, jobId, enrollment, tabId) {
+            for (let attempt = 1; attempt <= MAX_CAPTCHA_RETRIES; attempt++) {
+                  this.log(jobId, `[Tab ${tabId}] OCR CAPTCHA attempt ${attempt}/${MAX_CAPTCHA_RETRIES} for ${enrollment}`);
+                  this.emitCaptchaStatus(jobId, 'solving', `Tab ${tabId}: Attempt ${attempt}/${MAX_CAPTCHA_RETRIES}`);
+
+                  const captchaImg = await this.findCaptchaImg(page);
+                  if (!captchaImg) {
+                        this.log(jobId, `[Tab ${tabId}] CAPTCHA image element not found on page`, 'warn');
+                        return { solved: false, reason: 'CAPTCHA image not found' };
+                  }
+
+                  const ocrText = await solveCaptchaFromElement(captchaImg)
+                        || await solveCaptchaFromElement(page, CAPTCHA_IMG_SELECTORS);
+
+                  if (!ocrText || ocrText.length < 3) {
+                        this.log(jobId, `[Tab ${tabId}] OCR returned empty/short text: "${ocrText}", retrying...`, 'warn');
+                        await this.delay(1000);
+                        await this._refreshCaptcha(page);
+                        continue;
+                  }
+
+                  this.log(jobId, `[Tab ${tabId}] OCR result: "${ocrText}" — filling input`);
+                  this.emitCaptchaStatus(jobId, 'filling', `Tab ${tabId}: ${ocrText}`);
+
+                  const captchaInput = await page.$('input[name="ctl00$ContentPlaceHolder1$TextBox1"]')
+                        || await page.$('#ctl00_ContentPlaceHolder1_TextBox1');
+                  if (!captchaInput) {
+                        return { solved: false, reason: 'CAPTCHA input not found' };
+                  }
+
+                  await captchaInput.click({ clickCount: 3 });
+                  await captchaInput.fill('');
+                  await captchaInput.type(ocrText, { delay: 60 });
+
+                  page._lastAlert = null;
+                  const submitBtn = await page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
+                  if (submitBtn) {
+                        await submitBtn.click();
+                        this.log(jobId, `[Tab ${tabId}] Submitted with CAPTCHA="${ocrText}", waiting for response...`);
+
+                        const startWait = Date.now();
+                        while (Date.now() - startWait < 8000) {
+                              await this.delay(400);
+                              if (page._lastAlert) break;
+                              if (await this.isResultDisplayed(page)) break;
+                              if (!(await this.isOnEntryForm(page))) break;
+                        }
+                  }
+
+                  if (page._lastAlert) {
+                        const alert = page._lastAlert;
+                        this.log(jobId, `[Tab ${tabId}] Alert: "${alert}"`, 'warn');
+
+                        if (/wrong text/i.test(alert) || /invalid captcha/i.test(alert) || /wrong captcha/i.test(alert)) {
+                              this.emitCaptchaStatus(jobId, 'wrong', `Tab ${tabId}: ${ocrText}`);
+                              await this.delay(1200);
+                              await this._refreshCaptcha(page);
+                              continue;
+                        }
+
+                        if (/not found/i.test(alert)) {
+                              return { solved: true, text: ocrText, alertText: alert };
+                        }
+                  }
+
+                  if (await this.isResultDisplayed(page) || !(await this.isOnEntryForm(page))) {
+                        this.log(jobId, `✓ [Tab ${tabId}] CAPTCHA solved with "${ocrText}"! Result loaded.`);
+                        this.emitCaptchaStatus(jobId, 'solved', `Tab ${tabId}: ${ocrText}`);
+                        return { solved: true, text: ocrText, alertText: page._lastAlert };
+                  }
+
+                  await this._refreshCaptcha(page);
+            }
+
+            return { solved: false, reason: `OCR failed after ${MAX_CAPTCHA_RETRIES} attempts` };
+      }
+
+      async waitForManualCaptchaOnTab(page, jobId, enrollment, tabId) {
+            this.log(jobId, `[Tab ${tabId}] Manual verification assistance requested for ${enrollment}`, 'warn');
+            this.emitCaptchaRequired(jobId, tabId, enrollment);
+
+            // Bring this tab to the foreground only if not running headless
+            if (process.env.HEADLESS_BROWSER === 'false') {
+                  await page.bringToFront().catch(() => { });
+            }
+
+            return new Promise((resolve) => {
+                  let isResolved = false;
+
+                  const cleanup = () => {
+                        isResolved = true;
+                        if (pollTimer) clearInterval(pollTimer);
+                        if (timeoutTimer) clearTimeout(timeoutTimer);
+                        this.captchaResolvers.delete(tabId);
+                  };
+
+                  const timeoutTimer = setTimeout(() => {
+                        if (!isResolved) {
+                              cleanup();
+                              this.log(jobId, `[Tab ${tabId}] Manual CAPTCHA wait timed out after 3 minutes`, 'warn');
+                              resolve(false);
+                        }
+                  }, CAPTCHA_WAIT_MS);
+
+                  this.captchaResolvers.set(tabId, (solved = true) => {
+                        if (!isResolved) {
+                              cleanup();
+                              this.log(jobId, `✓ [Tab ${tabId}] Resume signal received`);
+                              resolve(solved);
+                        }
+                  });
+
+                  // Poller: auto-detect user submission or 5-char entry
+                  let autoSubmitAttempted = false;
+                  const pollTimer = setInterval(async () => {
+                        if (isResolved || page.isClosed()) {
+                              cleanup();
+                              return;
+                        }
+                        try {
+                              if (await this.isResultDisplayed(page) || !(await this.isOnEntryForm(page)) || page._lastAlert) {
+                                    this.log(jobId, `✓ [Tab ${tabId}] Auto-detected result in tab — resuming automatically!`);
+                                    cleanup();
+                                    resolve(true);
+                                    return;
+                              }
+
+                              const captchaVal = await page.$eval(
+                                    'input[name="ctl00$ContentPlaceHolder1$TextBox1"], #ctl00_ContentPlaceHolder1_TextBox1',
+                                    el => (el.value || '').trim()
+                              ).catch(() => '');
+
+                              if (captchaVal.length === 5 && !autoSubmitAttempted) {
+                                    autoSubmitAttempted = true;
+                                    this.log(jobId, `[Tab ${tabId}] 5-character CAPTCHA detected: "${captchaVal}" — auto-submitting`);
+                                    const submitBtn = await page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
+                                    if (submitBtn) {
+                                          await submitBtn.click().catch(() => { });
+                                    }
+                              }
+                        } catch { /* ignore navigation errors */ }
+                  }, 600);
+            });
+      }
+
+      // ── Process Single Result on a Tab ───────────────────────────────────────────
+      async fetchSingleResultOnTab(page, enrollment, jobConfig, jobId, tabId) {
             const baseResult = {
                   enrollmentNumber: enrollment,
                   collegeCode: jobConfig.collegeCode,
@@ -742,110 +686,85 @@ class ResultFetcherService {
                   source: 'sourceB',
             };
 
-            await this.ensureBrowser();
-            this.setupDialogHandler();
-
             for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-                  this.log(jobId, `Attempt ${attempt}/${MAX_RETRIES} for ${enrollment}`);
+                  this.log(jobId, `[Tab ${tabId}] Attempt ${attempt}/${MAX_RETRIES} for ${enrollment}`);
 
                   try {
-                        // ── Navigate to result entry form ────────────────────────────────
-                        if (!(await this.isOnEntryForm())) {
-                              const nav = await this.navigateToResultPage(jobConfig, jobId);
-                              if (!nav.success) {
-                                    baseResult.fetchStatus = 'portal_error';
-                                    baseResult.errorMessage = nav.error;
-                                    return baseResult;
-                              }
+                        if (!(await this.isOnEntryForm(page))) {
+                              const targetUrl = this._resolvedEntryUrl || getDirectUrl(jobConfig.course, jobConfig.resultMode || 'Grading');
+                              await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT });
+                              await this.delay(1000);
                         }
 
-                        await this.delay(500);
-                        this._lastAlert = null;
+                        page._lastAlert = null;
 
-                        // ── Fill enrollment number ────────────────────────────────────────
-                        const enrollInput = await this.page.waitForSelector(
+                        // Fill enrollment
+                        const enrollInput = await page.waitForSelector(
                               'input[name="ctl00$ContentPlaceHolder1$txtrollno"]',
                               { state: 'visible', timeout: 10000 }
                         );
                         await enrollInput.click({ clickCount: 3 });
                         await enrollInput.fill('');
-                        await enrollInput.type(enrollment, { delay: 80 });
-                        this.log(jobId, `Filled enrollment: ${enrollment}`);
+                        await enrollInput.type(enrollment, { delay: 60 });
 
-                        // ── Select semester ───────────────────────────────────────────────
-                        const semSel = await this.page.$('select[name="ctl00$ContentPlaceHolder1$drpSemester"]');
+                        // Select semester
+                        const semSel = await page.$('select[name="ctl00$ContentPlaceHolder1$drpSemester"]');
                         if (semSel) {
                               const semStr = String(jobConfig.semester);
                               await semSel.selectOption({ label: semStr })
                                     .catch(() => semSel.selectOption({ value: semStr }).catch(() => { }));
-                              this.log(jobId, `Selected semester: ${semStr}`);
                         }
 
-                        // ── Handle CAPTCHA ────────────────────────────────────────────────
-                        await this.delay(500);
+                        await this.delay(400);
 
-                        if (await this.isCaptchaVisible()) {
-                              this.log(jobId, 'CAPTCHA detected — attempting auto OCR solve');
-                              this.emitCaptchaStatus(jobId, 'detected', '');
-
-                              const ocrResult = await this.autoSolveCaptcha(jobId, enrollment);
+                        // CAPTCHA handling
+                        if (await this.isCaptchaVisible(page)) {
+                              const ocrResult = await this.autoSolveCaptchaOnTab(page, jobId, enrollment, tabId);
 
                               if (ocrResult.solved) {
-                                    // Check if it was "not found" (CAPTCHA correct, enrollment missing)
                                     if (ocrResult.alertText && /not found/i.test(ocrResult.alertText)) {
                                           baseResult.fetchStatus = 'missing';
                                           baseResult.resultStatus = 'NOT_FOUND';
-                                          await this.clickReset();
+                                          await this.clickReset(page);
                                           return baseResult;
                                     }
 
-                                    // CAPTCHA solved and page navigated — scrape result
-                                    const scraped = await this.scrapeResult(enrollment);
+                                    const scraped = await this.scrapeResult(page, enrollment);
                                     if (scraped) {
                                           Object.assign(baseResult, scraped);
                                           baseResult.fetchStatus = 'completed';
                                           baseResult.fetchedAt = new Date();
-                                          this.log(jobId, `✓ ${enrollment} → ${baseResult.resultStatus} SGPA=${baseResult.sgpa}`);
-                                          this.emitCaptchaStatus(jobId, 'completed', '');
-                                          await this.clickReset();
+                                          this.log(jobId, `✓ [Tab ${tabId}] ${enrollment} → ${baseResult.resultStatus} SGPA=${baseResult.sgpa}`);
+                                          await this.clickReset(page);
                                           return baseResult;
                                     }
 
-                                    // Page might still be on form — fall through to retry
-                                    this.log(jobId, 'CAPTCHA solved but result not found on page, retrying...', 'warn');
                                     continue;
-
                               } else {
-                                    // OCR failed — fall back to manual
-                                    this.log(jobId, `OCR failed: ${ocrResult.reason} — requesting manual solve`, 'warn');
-                                    const manualSolved = await this.waitForManualCaptcha(jobId);
+                                    const manualSolved = await this.waitForManualCaptchaOnTab(page, jobId, enrollment, tabId);
                                     if (!manualSolved) {
                                           baseResult.fetchStatus = 'verification_required';
-                                          baseResult.errorMessage = 'CAPTCHA timed out (auto OCR failed and manual timed out)';
+                                          baseResult.errorMessage = 'CAPTCHA verification timed out';
                                           return baseResult;
                                     }
-                                    this.log(jobId, 'Manual CAPTCHA resolved by user, checking result...');
                                     await this.delay(1500);
                               }
                         } else {
-                              // No CAPTCHA — submit directly
-                              this._lastAlert = null;
-                              const submitBtn = await this.page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
+                              page._lastAlert = null;
+                              const submitBtn = await page.$('input[name="ctl00$ContentPlaceHolder1$btnviewresult"]');
                               if (submitBtn) {
                                     await submitBtn.click();
-                                    this.log(jobId, 'No CAPTCHA — submitted form directly');
-                                    await this.delay(3000);
+                                    await this.delay(2500);
                               }
                         }
 
-                        // ── Check alert ───────────────────────────────────────────────────
-                        if (this._lastAlert) {
-                              const alert = this._lastAlert;
-                              this.log(jobId, `Alert: "${alert}"`, 'warn');
+                        // Check alert
+                        if (page._lastAlert) {
+                              const alert = page._lastAlert;
                               if (/not found/i.test(alert)) {
                                     baseResult.fetchStatus = 'missing';
                                     baseResult.resultStatus = 'NOT_FOUND';
-                                    await this.clickReset();
+                                    await this.clickReset(page);
                                     return baseResult;
                               }
                               if (/wrong text/i.test(alert) || /captcha/i.test(alert)) {
@@ -854,19 +773,19 @@ class ResultFetcherService {
                               }
                         }
 
-                        // ── Scrape result ─────────────────────────────────────────────────
-                        const scraped = await this.scrapeResult(enrollment);
+                        // Scrape result
+                        const scraped = await this.scrapeResult(page, enrollment);
                         if (scraped) {
                               Object.assign(baseResult, scraped);
                               baseResult.fetchStatus = 'completed';
                               baseResult.fetchedAt = new Date();
-                              this.log(jobId, `✓ ${enrollment} → ${baseResult.resultStatus} SGPA=${baseResult.sgpa}`);
-                              await this.clickReset();
+                              this.log(jobId, `✓ [Tab ${tabId}] ${enrollment} → ${baseResult.resultStatus} SGPA=${baseResult.sgpa}`);
+                              await this.clickReset(page);
                               return baseResult;
                         }
 
-                        if (await this.isOnEntryForm()) {
-                              this.log(jobId, 'Result did not appear, retrying...', 'warn');
+                        if (await this.isOnEntryForm(page)) {
+                              this.log(jobId, `[Tab ${tabId}] Result did not appear, retrying...`, 'warn');
                               await this.delay(RETRY_DELAY_MS);
                               continue;
                         }
@@ -876,11 +795,10 @@ class ResultFetcherService {
                         return baseResult;
 
                   } catch (err) {
-                        this.log(jobId, `Attempt ${attempt} error: ${err.message}`, 'error');
+                        this.log(jobId, `[Tab ${tabId}] Attempt ${attempt} error: ${err.message}`, 'error');
                         if (attempt < MAX_RETRIES) {
                               await this.delay(RETRY_DELAY_MS);
-                              await this.ensureBrowser().catch(() => { });
-                              this.setupDialogHandler();
+                              this.setupDialogHandlerForPage(page, tabId);
                         } else {
                               baseResult.fetchStatus = 'network_error';
                               baseResult.errorMessage = err.message;
@@ -891,7 +809,206 @@ class ResultFetcherService {
             return baseResult;
       }
 
-      // ── Demo result generator ─────────────────────────────────────────────────────
+      // ── Tab State Getters ─────────────────────────────────────────────────────────
+      getTabsStatus() {
+            return this.tabs.map(t => ({
+                  tabId: t.tabId,
+                  tabName: t.tabName,
+                  enrollmentNumber: t.enrollmentNumber || '—',
+                  status: t.status,
+                  message: t.message || '',
+            }));
+      }
+
+      getActiveTabsCount() {
+            return this.tabs.length;
+      }
+
+      getProcessingCount() {
+            return this.tabs.filter(t => t.status === 'Processing').length;
+      }
+
+      // ── Concurrent Queue Worker Pool ──────────────────────────────────────────────
+      /**
+       * Primary execution method:
+       * Launches ONE Chrome window, opens up to MAX_PARALLEL_TABS tabs, and processes
+       * the pending enrollment queue concurrently. Each completed tab immediately picks
+       * up the next student from the queue.
+       */
+      async processConcurrentQueue(job, pendingEnrollments, onResult, onTabUpdate, demoMode = false) {
+            const queue = [...pendingEnrollments];
+            const totalToProcess = queue.length;
+            const numTabs = Math.min(totalToProcess, this.maxTabs);
+
+            this.log(job._id, `Starting concurrent queue: ${totalToProcess} students with ${numTabs} tabs in 1 Chrome window`);
+
+            // Initialize tab state registry
+            this.tabs = [];
+            for (let i = 0; i < numTabs; i++) {
+                  this.tabs.push({
+                        tabId: i + 1,
+                        tabName: `Tab ${i + 1}`,
+                        page: null,
+                        enrollmentNumber: null,
+                        status: 'Waiting',
+                        message: 'Standing by',
+                  });
+            }
+
+            onTabUpdate(this.getTabsStatus());
+
+            // ── DEMO MODE BRANCH ───────────────────────────────────────────────────────
+            if (demoMode) {
+                  this.log(job._id, `[Demo Mode] Running ${numTabs} concurrent simulated workers`);
+
+                  const runDemoWorker = async (tab) => {
+                        while (!this.isCancelled && queue.length > 0) {
+                              const ok = await this.waitWhilePaused();
+                              if (!ok) break;
+
+                              const enrollment = queue.shift();
+                              if (!enrollment) break;
+
+                              tab.enrollmentNumber = enrollment;
+                              tab.status = 'Processing';
+                              tab.message = `Processing ${enrollment}`;
+                              onTabUpdate(this.getTabsStatus());
+
+                              // Realistic processing delay (600-1400ms)
+                              await this.delay(600 + Math.random() * 800);
+
+                              const resultData = this.generateDemoResult(enrollment, job);
+                              await onResult(resultData, tab.tabId, enrollment);
+
+                              tab.status = 'Completed';
+                              tab.message = `${resultData.resultStatus} (SGPA: ${resultData.sgpa})`;
+                              onTabUpdate(this.getTabsStatus());
+
+                              await this.delay(200);
+                        }
+                        tab.status = 'Waiting';
+                        tab.enrollmentNumber = null;
+                        tab.message = 'Finished assigned';
+                        onTabUpdate(this.getTabsStatus());
+                  };
+
+                  const demoWorkers = this.tabs.map(tab => runDemoWorker(tab));
+                  await Promise.all(demoWorkers);
+                  return;
+            }
+
+            // ── LIVE MODE BRANCH (Real Playwright Browser with 20 Tabs) ────────────────
+            try {
+                  await this.launchBrowser();
+
+                  // Create Tab 1 first and resolve the entry URL
+                  const firstPage = await this.context.newPage();
+                  firstPage.setDefaultTimeout(PAGE_TIMEOUT);
+                  this.setupDialogHandlerForPage(firstPage, 1);
+                  this.tabs[0].page = firstPage;
+
+                  this.tabs[0].status = 'Processing';
+                  this.tabs[0].message = 'Resolving portal entry form';
+                  onTabUpdate(this.getTabsStatus());
+
+                  const initNav = await this.resolveInitialEntryUrl(firstPage, job, job._id);
+                  if (!initNav.success && !this._resolvedEntryUrl) {
+                        throw new Error(`Failed to initialize portal entry form: ${initNav.error}`);
+                  }
+
+                  // Spawn the remaining tabs in the SAME single window
+                  for (let i = 1; i < numTabs; i++) {
+                        const page = await this.context.newPage();
+                        page.setDefaultTimeout(PAGE_TIMEOUT);
+                        this.setupDialogHandlerForPage(page, i + 1);
+                        this.tabs[i].page = page;
+
+                        // Navigate each tab to the resolved entry URL with a slight stagger
+                        if (this._resolvedEntryUrl) {
+                              page.goto(this._resolvedEntryUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT }).catch(() => { });
+                        }
+                        await this.delay(200);
+                  }
+
+                  this.log(job._id, `✓ All ${numTabs} tabs open and ready in single Chrome window`);
+
+                  // ── Worker Tab Loop ────────────────────────────────────────────────────
+                  const runWorkerTab = async (tab) => {
+                        const tabId = tab.tabId;
+                        const page = tab.page;
+
+                        while (!this.isCancelled) {
+                              const ok = await this.waitWhilePaused();
+                              if (!ok) break;
+
+                              const enrollment = queue.shift();
+                              if (!enrollment) {
+                                    tab.status = 'Waiting';
+                                    tab.enrollmentNumber = null;
+                                    tab.message = 'Queue finished';
+                                    onTabUpdate(this.getTabsStatus());
+                                    break;
+                              }
+
+                              tab.enrollmentNumber = enrollment;
+                              tab.status = 'Processing';
+                              tab.message = `Processing ${enrollment}`;
+                              onTabUpdate(this.getTabsStatus());
+
+                              try {
+                                    const resultData = await this.fetchSingleResultOnTab(page, enrollment, job, job._id, tabId);
+                                    await onResult(resultData, tabId, enrollment);
+
+                                    if (resultData.fetchStatus === 'completed') {
+                                          tab.status = 'Completed';
+                                          tab.message = `${resultData.resultStatus} (SGPA: ${resultData.sgpa ?? '—'})`;
+                                    } else if (resultData.fetchStatus === 'missing' || resultData.resultStatus === 'NOT_FOUND') {
+                                          tab.status = 'Not Found';
+                                          tab.message = 'Result not found on portal';
+                                    } else if (resultData.fetchStatus === 'verification_required') {
+                                          tab.status = 'CAPTCHA Required';
+                                          tab.message = 'Verification timed out';
+                                    } else if (resultData.fetchStatus === 'network_error' || resultData.fetchStatus === 'portal_error') {
+                                          tab.status = 'Network Error';
+                                          tab.message = resultData.errorMessage || 'Network error';
+                                    } else {
+                                          tab.status = 'Failed';
+                                          tab.message = resultData.errorMessage || 'Failed';
+                                    }
+                                    onTabUpdate(this.getTabsStatus());
+
+                                    // Brief pause before taking next student on this tab
+                                    await this.delay(1200);
+
+                              } catch (err) {
+                                    logger.error(`[Tab ${tabId}] [${enrollment}] worker error: ${err.message}`);
+                                    tab.status = 'Network Error';
+                                    tab.message = err.message;
+                                    onTabUpdate(this.getTabsStatus());
+
+                                    const errResult = {
+                                          jobId: job._id,
+                                          enrollmentNumber: enrollment,
+                                          fetchStatus: 'network_error',
+                                          resultStatus: 'PENDING',
+                                          errorMessage: err.message,
+                                          fetchedAt: new Date(),
+                                    };
+                                    await onResult(errResult, tabId, enrollment);
+                              }
+                        }
+                  };
+
+                  // Run all worker tabs concurrently!
+                  const workers = this.tabs.map(tab => runWorkerTab(tab));
+                  await Promise.all(workers);
+
+            } finally {
+                  await this.closeBrowser();
+            }
+      }
+
+      // ── Demo Result Generator ─────────────────────────────────────────────────────
       generateDemoResult(enrollment, jobConfig) {
             const pool = ['PASS', 'PASS', 'PASS', 'PASS', 'FAIL'];
             const status = pool[Math.floor(Math.random() * pool.length)];
@@ -904,7 +1021,7 @@ class ResultFetcherService {
                   .map((name, i) => {
                         const passed = status === 'PASS' || i < 4;
                         return {
-                              subjectCode: `${jobConfig.branch.substring(0, 2).toUpperCase()}${jobConfig.semester}0${i + 1}`,
+                              subjectCode: `${(jobConfig.branch || 'CS').substring(0, 2).toUpperCase()}${jobConfig.semester || '4'}0${i + 1}`,
                               subjectName: `[DEMO] ${name}`,
                               internalMarks: Math.floor(20 + Math.random() * 30),
                               externalMarks: Math.floor(passed ? 32 : 10 + Math.random() * 22),
@@ -926,7 +1043,9 @@ class ResultFetcherService {
                   examinationSession: jobConfig.examinationSession,
                   resultType: jobConfig.resultType || 'Main',
                   resultMode: jobConfig.resultMode || 'Grading',
-                  subjects, sgpa, cgpa,
+                  subjects,
+                  sgpa,
+                  cgpa,
                   totalCredits: 20,
                   backlogs: subjects.filter(s => s.grade === 'F').length,
                   resultStatus: status,

@@ -62,7 +62,7 @@ export default function SettingsPage() {
                   <div className="card">
                         <h2 className="font-semibold text-gray-800 dark:text-gray-200 mb-3">About</h2>
                         <div className="text-sm text-gray-500 space-y-1">
-                              <p>RGPV Smart Bulk Result Manager v1.0</p>
+                              <p>SIRT Smart Bulk Result Manager v1.0</p>
                               <p>Results are fetched from official RGPV portals only.</p>
                         </div>
                   </div>
