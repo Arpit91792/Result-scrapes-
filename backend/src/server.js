@@ -74,15 +74,22 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ── Start ──────────────────────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/rgpv_results')
-  .then(() => {
-    logger.info('Connected to MongoDB');
-    server.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
-  })
-  .catch(err => {
-    logger.error('MongoDB connection error:', err.message);
-    process.exit(1);
-  });
+
+// ── Start server ──────────────────────────────────────────────
+server.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Server running on port ${PORT}`);
+});
+
+if (process.env.MONGODB_URI) {
+  mongoose.connect(process.env.MONGODB_URI)
+    .then(() => {
+      logger.info('Connected to MongoDB');
+    })
+    .catch(err => {
+      logger.error('MongoDB connection error:', err.message);
+    });
+} else {
+  logger.warn('MONGODB_URI not configured. Database connection skipped.');
+}
 
 module.exports = { app, server };
