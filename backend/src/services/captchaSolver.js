@@ -24,33 +24,91 @@ const { createWorker } = require('tesseract.js');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
 const logger = require('../utils/logger');
 
 // Cache dir for Tesseract language data
 const TESSDATA_DIR = path.join(__dirname, '../../tessdata');
 if (!fs.existsSync(TESSDATA_DIR)) fs.mkdirSync(TESSDATA_DIR, { recursive: true });
 
-// Single reusable Tesseract worker (created lazily)
-let _worker = null;
+const OCR_POOL_SIZE = Number(process.env.OCR_POOL_SIZE || 25);
+if (!Number.isInteger(OCR_POOL_SIZE) || OCR_POOL_SIZE < 1) {
+      throw new Error('OCR_POOL_SIZE must be a positive integer');
+}
+let _workers = [];
+let _availableWorkers = [];
+let _waitingRequests = [];
+let _poolInitialization = null;
 
-async function getWorker() {
-      if (_worker) return _worker;
-
-      logger.info('Initialising Tesseract OCR worker...');
-      _worker = await createWorker('eng', 1, {
+async function createOcrWorker() {
+      const worker = await createWorker('eng', 1, {
             cachePath: TESSDATA_DIR,
             logger: () => { },        // silence verbose progress logs
       });
 
-      await _worker.setParameters({
-            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-            tessedit_pageseg_mode: '8',  // PSM_SINGLE_WORD
-            preserve_interword_spaces: '0',
-      });
+      try {
+            await worker.setParameters({
+                  tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                  tessedit_pageseg_mode: '8',  // PSM_SINGLE_WORD
+                  preserve_interword_spaces: '0',
+            });
+            return worker;
+      } catch (err) {
+            await worker.terminate().catch(() => { });
+            throw err;
+      }
+}
 
-      logger.info('Tesseract worker ready');
-      return _worker;
+async function initializeWorkerPool() {
+      if (_workers.length === OCR_POOL_SIZE) return;
+      if (_poolInitialization) return _poolInitialization;
+
+      logger.info(`Initialising Tesseract OCR worker pool (${OCR_POOL_SIZE} workers)...`);
+      _poolInitialization = (async () => {
+            const results = await Promise.allSettled(
+                  Array.from({ length: OCR_POOL_SIZE }, () => createOcrWorker())
+            );
+            const workers = results
+                  .filter(result => result.status === 'fulfilled')
+                  .map(result => result.value);
+            const failure = results.find(result => result.status === 'rejected');
+
+            if (failure) {
+                  await Promise.all(workers.map(worker => worker.terminate().catch(() => { })));
+                  throw failure.reason;
+            }
+
+            _workers = workers;
+            _availableWorkers = [...workers];
+            logger.info(`Tesseract OCR worker pool ready (${OCR_POOL_SIZE} workers)`);
+      })();
+
+      try {
+            await _poolInitialization;
+      } catch (err) {
+            _poolInitialization = null;
+            throw err;
+      }
+}
+
+async function acquireWorker() {
+      await initializeWorkerPool();
+      if (_availableWorkers.length > 0) return _availableWorkers.pop();
+      return new Promise(resolve => _waitingRequests.push(resolve));
+}
+
+function releaseWorker(worker) {
+      if (!_workers.includes(worker)) return;
+      const nextRequest = _waitingRequests.shift();
+      if (nextRequest) {
+            nextRequest(worker);
+      } else {
+            _availableWorkers.push(worker);
+      }
+}
+
+async function getWorker() {
+      await initializeWorkerPool();
+      return _workers[0];
 }
 
 /**
@@ -101,8 +159,9 @@ function cleanOcrText(raw) {
  * Tries thresholded -> sharpened/contrast -> raw to reliably get 5 chars.
  */
 async function solveCaptchaFromBuffer(buffer) {
+      let worker = null;
       try {
-            const worker = await getWorker();
+            worker = await acquireWorker();
 
             // Pass 1: Thresholded Lanczos 3x
             const p1 = await preprocessCaptcha(buffer);
@@ -160,6 +219,8 @@ async function solveCaptchaFromBuffer(buffer) {
       } catch (err) {
             logger.error('solveCaptchaFromBuffer error:', err.message);
             return null;
+      } finally {
+            if (worker) releaseWorker(worker);
       }
 }
 
@@ -219,11 +280,18 @@ async function solveCaptchaFromElement(pageOrElement, captchaImgSelector) {
  * Terminate the Tesseract worker (call on app shutdown).
  */
 async function terminateWorker() {
-      if (_worker) {
-            await _worker.terminate();
-            _worker = null;
-            logger.info('Tesseract worker terminated');
+      if (_poolInitialization) {
+            await _poolInitialization.catch(() => { });
       }
+
+      const workers = _workers;
+      _workers = [];
+      _availableWorkers = [];
+      _poolInitialization = null;
+      _waitingRequests.splice(0).forEach(resolve => resolve(null));
+
+      await Promise.all(workers.map(worker => worker.terminate()));
+      if (workers.length > 0) logger.info(`Tesseract OCR worker pool terminated (${workers.length} workers)`);
 }
 
 module.exports = {

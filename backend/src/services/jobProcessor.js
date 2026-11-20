@@ -14,6 +14,7 @@ const logger = require('../utils/logger');
 
 // In-memory: jobId (string) → active ResultFetcherService
 const activeJobs = new Map();
+const activeRuns = new Map();
 
 class JobProcessor {
       constructor(io) {
@@ -53,6 +54,17 @@ class JobProcessor {
             if (!job) throw new Error('Job not found');
             if (job.status === 'running') throw new Error('Job already running');
 
+            const refreshedJob = await this.refreshJobStats(jobId);
+            if (refreshedJob) {
+                  job.completedCount = refreshedJob.completedCount;
+                  job.pendingCount = refreshedJob.pendingCount;
+                  job.passedCount = refreshedJob.passedCount;
+                  job.failedCount = refreshedJob.failedCount;
+                  job.missingCount = refreshedJob.missingCount;
+                  job.verificationRequiredCount = refreshedJob.verificationRequiredCount;
+                  job.failedRequestsCount = refreshedJob.failedRequestsCount;
+            }
+
             // Find already-completed records to avoid double counting on resumes
             const finishedDocs = await StudentResult.find({
                   jobId,
@@ -64,6 +76,17 @@ class JobProcessor {
 
             const pendingEnrollments = (job.enrollmentList || []).filter(en => !finishedSet.has(en));
 
+            if (pendingEnrollments.length === 0) {
+                  job.status = 'completed';
+                  job.completedCount = alreadyDone;
+                  job.pendingCount = 0;
+                  job.errorMessage = null;
+                  await job.save();
+                  this.emitProgress(jobId, job, { message: 'All student results are already available' });
+                  this.io.to(`job_${jobId}`).emit('job_completed', { jobId });
+                  return job;
+            }
+
             const fetcher = new ResultFetcherService(this.io);
             activeJobs.set(String(jobId), fetcher);
             registerFetcher(jobId, fetcher);
@@ -71,14 +94,7 @@ class JobProcessor {
             job.status = 'running';
             job.completedCount = alreadyDone;
             job.pendingCount = Math.max(0, job.totalStudents - alreadyDone);
-
-            if (alreadyDone === 0) {
-                  job.passedCount = 0;
-                  job.failedCount = 0;
-                  job.missingCount = 0;
-                  job.verificationRequiredCount = 0;
-                  job.failedRequestsCount = 0;
-            }
+            job.errorMessage = null;
 
             await job.save();
             this.emitProgress(jobId, job, {
@@ -88,53 +104,141 @@ class JobProcessor {
             });
 
             // Fire-and-forget background worker
-            this._processJob(jobId, job, fetcher, demoMode, pendingEnrollments).catch(err => {
+            const run = this._processJob(jobId, job, fetcher, demoMode, pendingEnrollments).catch(err => {
                   logger.error(`Job ${jobId} crashed: ${err.message}`);
+                  return FetchJob.findByIdAndUpdate(jobId, {
+                        $set: { status: 'failed', errorMessage: err.message }
+                  }).catch(updateError => {
+                        logger.error(`Could not save failed status for job ${jobId}: ${updateError.message}`);
+                  }).finally(() => {
+                        const currentFetcher = activeJobs.get(String(jobId)) || fetcher;
+                        activeJobs.delete(String(jobId));
+                        unregisterFetcher(jobId);
+                        return currentFetcher.closeBrowser().catch(closeError => {
+                              logger.warn(`Could not close browser for job ${jobId}: ${closeError.message}`);
+                        });
+                  });
+            }).finally(() => {
+                  activeRuns.delete(String(jobId));
             });
+            activeRuns.set(String(jobId), run);
 
             return job;
+      }
+
+      async refreshJobStats(jobId) {
+            const allResults = await StudentResult.find({ jobId }).lean();
+            let passedCount = 0;
+            let failedCount = 0;
+            let missingCount = 0;
+            let verificationRequiredCount = 0;
+            let failedRequestsCount = 0;
+            let completedCount = 0;
+
+            for (const res of allResults) {
+                  if (res.fetchStatus === 'completed' || res.fetchStatus === 'missing') {
+                        completedCount++;
+                  }
+                  if (res.resultStatus === 'PASS' || res.resultStatus === 'PASS WITH GRACE') {
+                        passedCount++;
+                  } else if (res.resultStatus === 'FAIL') {
+                        failedCount++;
+                  }
+                  if (res.fetchStatus === 'missing' || res.resultStatus === 'NOT_FOUND') {
+                        missingCount++;
+                  }
+                  if (res.fetchStatus === 'verification_required') {
+                        verificationRequiredCount++;
+                  }
+                  if (res.fetchStatus === 'network_error' || res.fetchStatus === 'portal_error') {
+                        failedRequestsCount++;
+                  }
+            }
+
+            const currentJob = await FetchJob.findById(jobId);
+            if (!currentJob) return null;
+
+            const pendingCount = Math.max(0, currentJob.totalStudents - completedCount);
+            const updatedJob = await FetchJob.findByIdAndUpdate(
+                  jobId,
+                  {
+                        $set: {
+                              completedCount,
+                              pendingCount,
+                              passedCount,
+                              failedCount,
+                              missingCount,
+                              verificationRequiredCount,
+                              failedRequestsCount
+                        }
+                  },
+                  { new: true }
+            );
+            return updatedJob;
       }
 
       async _processJob(jobId, job, fetcher, demoMode, pendingEnrollments) {
             logger.info(`Job ${jobId}: ${job.totalStudents} total, ${pendingEnrollments.length} pending, ${job.completedCount} already completed`);
 
+            let activeFetcher = fetcher;
+            let isRetryRound = false;
+
             const onResult = async (resultData, tabId, enrollment) => {
                   try {
-                        // 1. Immediately save to MongoDB
+                        // 1. Immediately save/update to MongoDB
                         await StudentResult.findOneAndUpdate(
                               { jobId, enrollmentNumber: enrollment },
                               { $set: { ...resultData, jobId, fetchedAt: new Date() } },
                               { upsert: true, new: true }
                         );
 
-                        // 2. Atomic increment of counters to avoid parallel save collisions
-                        const incUpdates = { completedCount: 1 };
-                        if (resultData.resultStatus === 'PASS') incUpdates.passedCount = 1;
-                        else if (resultData.resultStatus === 'FAIL') incUpdates.failedCount = 1;
+                        let updatedJob = null;
+                        if (isRetryRound) {
+                              // During re-fetch passes, recalculate exact stats from database
+                              updatedJob = await this.refreshJobStats(jobId);
+                        } else {
+                              const incUpdates = {};
+                              const isFinished = resultData.fetchStatus === 'completed'
+                                    || resultData.fetchStatus === 'missing';
+                              if (isFinished) {
+                                    incUpdates.completedCount = 1;
+                                    if (resultData.resultStatus === 'PASS' || resultData.resultStatus === 'PASS WITH GRACE') {
+                                          incUpdates.passedCount = 1;
+                                    } else if (resultData.resultStatus === 'FAIL') {
+                                          incUpdates.failedCount = 1;
+                                    }
+                              }
 
-                        if (resultData.fetchStatus === 'missing' || resultData.resultStatus === 'NOT_FOUND') {
-                              incUpdates.missingCount = 1;
-                        }
-                        if (resultData.fetchStatus === 'verification_required') {
-                              incUpdates.verificationRequiredCount = 1;
-                        }
-                        if (resultData.fetchStatus === 'network_error' || resultData.fetchStatus === 'portal_error') {
-                              incUpdates.failedRequestsCount = 1;
-                        }
+                              if (resultData.fetchStatus === 'missing' || resultData.resultStatus === 'NOT_FOUND') {
+                                    incUpdates.missingCount = 1;
+                              }
+                              if (resultData.fetchStatus === 'verification_required') {
+                                    incUpdates.verificationRequiredCount = 1;
+                              }
+                              if (resultData.fetchStatus === 'network_error' || resultData.fetchStatus === 'portal_error') {
+                                    incUpdates.failedRequestsCount = 1;
+                              }
 
-                        const updatedJob = await FetchJob.findByIdAndUpdate(
-                              jobId,
-                              {
-                                    $inc: incUpdates,
+                              const updates = {
                                     $set: { currentEnrollment: enrollment }
-                              },
-                              { new: true }
-                        );
+                              };
+                              if (Object.keys(incUpdates).length > 0) {
+                                    updates.$inc = incUpdates;
+                              }
+
+                              updatedJob = await FetchJob.findByIdAndUpdate(
+                                    jobId,
+                                    updates,
+                                    { new: true }
+                              );
+
+                              if (updatedJob) {
+                                    updatedJob.pendingCount = Math.max(0, updatedJob.totalStudents - updatedJob.completedCount);
+                                    await FetchJob.findByIdAndUpdate(jobId, { $set: { pendingCount: updatedJob.pendingCount } });
+                              }
+                        }
 
                         if (updatedJob) {
-                              updatedJob.pendingCount = Math.max(0, updatedJob.totalStudents - updatedJob.completedCount);
-                              await FetchJob.findByIdAndUpdate(jobId, { $set: { pendingCount: updatedJob.pendingCount } });
-
                               // Keep in-memory reference synced
                               job.completedCount = updatedJob.completedCount;
                               job.pendingCount = updatedJob.pendingCount;
@@ -147,10 +251,10 @@ class JobProcessor {
 
                               // 3. Emit live progress
                               this.emitProgress(jobId, updatedJob, {
-                                    tabs: fetcher.getTabsStatus(),
-                                    activeTabsCount: fetcher.getActiveTabsCount(),
-                                    maxTabs: fetcher.maxTabs,
-                                    processingCount: fetcher.getProcessingCount(),
+                                    tabs: activeFetcher.getTabsStatus(),
+                                    activeTabsCount: activeFetcher.getActiveTabsCount(),
+                                    maxTabs: activeFetcher.maxTabs,
+                                    processingCount: activeFetcher.getProcessingCount(),
                               });
                         }
                   } catch (e) {
@@ -159,14 +263,14 @@ class JobProcessor {
             };
 
             const onTabUpdate = (tabsStatus) => {
-                  const activeTabsCount = fetcher.getActiveTabsCount();
-                  const processingCount = fetcher.getProcessingCount();
+                  const activeTabsCount = activeFetcher.getActiveTabsCount();
+                  const processingCount = activeFetcher.getProcessingCount();
 
                   // Broadcast dedicated tabs_status event
                   this.io.to(`job_${jobId}`).emit('tabs_status', {
                         jobId,
                         activeTabsCount,
-                        maxTabs: fetcher.maxTabs,
+                        maxTabs: activeFetcher.maxTabs,
                         processingCount,
                         tabs: tabsStatus,
                         progressStats: {
@@ -186,38 +290,112 @@ class JobProcessor {
                   this.emitProgress(jobId, job, {
                         tabs: tabsStatus,
                         activeTabsCount,
-                        maxTabs: fetcher.maxTabs,
+                        maxTabs: activeFetcher.maxTabs,
                         processingCount,
                   });
             };
 
+            let executionError = null;
             try {
-                  // Execute the 20-tab concurrent queue
-                  await fetcher.processConcurrentQueue(
+                  // Keep the browser open until verification-required students are collected.
+                  await activeFetcher.processConcurrentQueue(
                         job,
                         pendingEnrollments,
                         onResult,
                         onTabUpdate,
-                        demoMode
+                        demoMode,
+                        { keepBrowserOpen: true }
                   );
             } catch (err) {
                   logger.error(`Job ${jobId} execution error: ${err.message}`);
+                  executionError = err;
+            }
+
+            // Keep retrying only CAPTCHA-required students, giving each pass a fresh browser.
+            isRetryRound = true;
+            let retryRound = 1;
+
+            while (!activeFetcher.isCancelled) {
+                  const verificationDocs = await StudentResult.find({
+                        jobId,
+                        fetchStatus: 'verification_required'
+                  }).select('enrollmentNumber');
+
+                  if (verificationDocs.length === 0) break;
+
+                  const retryEnrollments = verificationDocs.map(d => d.enrollmentNumber);
+                  const retryMsg = `Found ${retryEnrollments.length} student(s) requiring verification. Re-fetching in a fresh browser window (Pass ${retryRound})...`;
+                  logger.info(`Job ${jobId}: ${retryMsg}`);
+
+                  this.emitProgress(jobId, job, {
+                        message: retryMsg,
+                        activeTabsCount: Math.min(retryEnrollments.length, activeFetcher.maxTabs),
+                        processingCount: 0,
+                  });
+
+                  try {
+                        const previousFetcher = activeFetcher;
+                        await previousFetcher.closeBrowser();
+                        if (previousFetcher.isCancelled) break;
+
+                        activeFetcher = new ResultFetcherService(this.io);
+                        if (previousFetcher.isPaused) activeFetcher.pause();
+                        activeJobs.set(String(jobId), activeFetcher);
+                        registerFetcher(jobId, activeFetcher);
+
+                        await activeFetcher.processConcurrentQueue(
+                              job,
+                              retryEnrollments,
+                              onResult,
+                              onTabUpdate,
+                              demoMode,
+                              { keepBrowserOpen: true }
+                        );
+                        executionError = null;
+                  } catch (retryErr) {
+                        logger.error(`Job ${jobId} CAPTCHA retry pass ${retryRound} error: ${retryErr.message}`);
+                        executionError = retryErr;
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                  }
+
+                  await this.refreshJobStats(jobId);
+                  retryRound++;
+            }
+
+            // Final stats sync from database
+            const finalJobStats = await this.refreshJobStats(jobId);
+            if (finalJobStats) {
+                  job.completedCount = finalJobStats.completedCount;
+                  job.pendingCount = finalJobStats.pendingCount;
+                  job.passedCount = finalJobStats.passedCount;
+                  job.failedCount = finalJobStats.failedCount;
+                  job.missingCount = finalJobStats.missingCount;
+                  job.verificationRequiredCount = finalJobStats.verificationRequiredCount;
+                  job.failedRequestsCount = finalJobStats.failedRequestsCount;
             }
 
             // ── Finalize Job ─────────────────────────────────────────────────────────
-            if (!fetcher.isCancelled) {
+            if (!activeFetcher.isCancelled && !executionError && job.completedCount >= job.totalStudents) {
                   job.status = 'completed';
                   job.currentEnrollment = null;
                   job.pendingCount = 0;
-                  job.completedCount = job.totalStudents;
             } else {
-                  job.status = 'cancelled';
+                  job.status = activeFetcher.isCancelled ? 'cancelled' : 'failed';
+                  if (executionError) {
+                        job.errorMessage = executionError.message;
+                  } else if (!activeFetcher.isCancelled) {
+                        job.errorMessage = `${job.pendingCount} student result(s) remain unresolved. Resume the job to retry them.`;
+                  }
             }
             await job.save();
 
-            const finalTabs = fetcher.getTabsStatus();
+            const finalTabs = activeFetcher.getTabsStatus();
             this.emitProgress(jobId, job, {
-                  message: job.status === 'completed' ? 'All student results fetched successfully!' : 'Job cancelled',
+                  message: job.status === 'completed'
+                        ? 'All student results fetched successfully!'
+                        : job.status === 'cancelled'
+                              ? 'Job cancelled'
+                              : job.errorMessage || 'Job stopped before all student results were fetched',
                   tabs: finalTabs,
                   activeTabsCount: 0,
                   processingCount: 0,
@@ -229,7 +407,7 @@ class JobProcessor {
 
             activeJobs.delete(String(jobId));
             unregisterFetcher(jobId);
-            await fetcher.closeBrowser().catch(() => { });
+            await activeFetcher.closeBrowser().catch(() => { });
       }
 
       async pauseJob(jobId) {
@@ -240,10 +418,12 @@ class JobProcessor {
 
       async resumeJob(jobId) {
             const f = activeJobs.get(String(jobId));
-            if (f) {
+            if (f && !f.isCancelled) {
                   f.resume();
                   await FetchJob.findByIdAndUpdate(jobId, { status: 'running' });
             } else {
+                  const activeRun = activeRuns.get(String(jobId));
+                  if (activeRun) await activeRun;
                   const job = await FetchJob.findById(jobId);
                   if (!job) throw new Error('Job not found');
                   await this.startJob(jobId, job.dataSource === 'demo');
@@ -252,10 +432,18 @@ class JobProcessor {
 
       async cancelJob(jobId) {
             const f = activeJobs.get(String(jobId));
-            if (f) f.stop();
-            await FetchJob.findByIdAndUpdate(jobId, { status: 'cancelled' });
-            activeJobs.delete(String(jobId));
-            unregisterFetcher(jobId);
+            const activeRun = activeRuns.get(String(jobId));
+            if (f) {
+                  f.stop();
+            }
+            if (activeRun) await activeRun;
+            if (f || !activeRun) {
+                  await FetchJob.findByIdAndUpdate(jobId, { status: 'cancelled' });
+            }
+            if (!activeRuns.has(String(jobId))) {
+                  activeJobs.delete(String(jobId));
+                  unregisterFetcher(jobId);
+            }
       }
 
       getActiveFetcher(jobId) {

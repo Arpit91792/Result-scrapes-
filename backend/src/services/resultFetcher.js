@@ -97,6 +97,12 @@ class ResultFetcherService {
        * Runs completely in the background without displaying a desktop window or taskbar icon.
        */
       async launchBrowser() {
+            if (this.browser && this.browser.isConnected()) {
+                  if (!this.context) {
+                        this.context = await this.browser.newContext({ viewport: { width: 1280, height: 800 } });
+                  }
+                  return this.context;
+            }
             const headlessMode = process.env.HEADLESS_BROWSER !== 'false';
             this.log('system', `Launching Chromium browser (headless=${headlessMode}, up to ${this.maxTabs} background tabs)`);
             this.browser = await chromium.launch({
@@ -130,6 +136,7 @@ class ResultFetcherService {
                         this.browser = null;
                         this.context = null;
                   }
+                  this._resolvedEntryUrl = null;
             } catch (e) {
                   logger.warn('Browser close:', e.message);
             }
@@ -231,6 +238,8 @@ class ResultFetcherService {
       // ── Scrape result and subjects on a given page ────────────────────────────────
       async scrapeSubjects(page) {
             const subjects = [];
+            const subjectCodePattern = /^[A-Z]{2,4}\s*-?\s*\d{3,4}[A-Z]?(?:\s*[-_(]?\s*\[?\s*[TPN]\s*\]?\s*\)?)?$/i;
+            const gradePattern = /^(?:O|A\+?|B\+?|C\+?|D|E|F|FF|P|AB|ABS|ABSENT|WH|WITHHELD|PASS|FAIL)$/i;
             try {
                   for (const panelId of [
                         '#ctl00_ContentPlaceHolder1_pnlGrading',
@@ -247,19 +256,46 @@ class ResultFetcherService {
                               const vals = await Promise.all(cells.map(c => c.innerText().then(t => t.trim()).catch(() => '')));
                               const first = vals[0].toLowerCase();
                               if (!first || first === 's.no' || first.includes('subject') || first.includes('code')) continue;
+                              const branchValue = vals.find(value => /Branch\s*[:\t]?\s*[A-Za-z]+/i.test(value));
+                              if (branchValue) {
+                                    subjects.push({ subjectCode: branchValue });
+                                    continue;
+                              }
+                              const courseIndex = vals.findIndex(value => value.toLowerCase() === 'course');
+                              if (courseIndex >= 0 && vals[courseIndex + 1]) {
+                                    subjects.push({ subjectCode: 'Course', grade: vals[courseIndex + 1] });
+                                    continue;
+                              }
                               const offset = /^\d{1,2}$/.test(vals[0]) ? 1 : 0;
-                              const code = vals[offset];
-                              if (!code || code.length < 2) continue;
-                              if (/^(sgpa|cgpa|total|grand|result|pass|fail)/i.test(code)) continue;
+                              const codeIndex = vals.findIndex(value => subjectCodePattern.test(value));
+                              if (codeIndex < 0) continue;
+                              const code = vals[codeIndex];
+                              const nameIndex = [
+                                    vals[codeIndex + 1],
+                                    vals[codeIndex - 1],
+                                    vals[offset + 1],
+                              ].findIndex(value => value
+                                    && !subjectCodePattern.test(value)
+                                    && !/^\d+(?:\.\d+)?$/.test(value)
+                                    && !gradePattern.test(value));
+                              const nameCandidates = [
+                                    codeIndex + 1,
+                                    codeIndex - 1,
+                                    offset + 1,
+                              ];
+                              const subjectName = nameIndex >= 0 ? vals[nameCandidates[nameIndex]] : '';
+                              const valueStartIndex = nameIndex >= 0 && nameCandidates[nameIndex] > codeIndex
+                                    ? nameCandidates[nameIndex] + 1
+                                    : codeIndex + 1;
                               subjects.push({
                                     subjectCode: code,
-                                    subjectName: vals[offset + 1] || '',
-                                    internalMarks: this.parseFloat_(vals[offset + 2]),
-                                    externalMarks: this.parseFloat_(vals[offset + 3]),
-                                    practicalMarks: this.parseFloat_(vals[offset + 4]),
-                                    totalMarks: this.parseFloat_(vals[offset + 5]),
-                                    credits: this.parseFloat_(vals[offset + 6]),
-                                    grade: vals[offset + 7] || vals[vals.length - 1] || null,
+                                    subjectName,
+                                    internalMarks: this.parseFloat_(vals[valueStartIndex]),
+                                    externalMarks: this.parseFloat_(vals[valueStartIndex + 1]),
+                                    practicalMarks: this.parseFloat_(vals[valueStartIndex + 2]),
+                                    totalMarks: this.parseFloat_(vals[valueStartIndex + 3]),
+                                    credits: this.parseFloat_(vals[valueStartIndex + 4]),
+                                    grade: vals[valueStartIndex + 5] || vals[vals.length - 1] || null,
                               });
                         }
                         if (subjects.length > 0) break;
@@ -753,6 +789,12 @@ class ResultFetcherService {
 
                                     continue;
                               } else {
+                                    if (process.env.HEADLESS_BROWSER !== 'false') {
+                                          baseResult.fetchStatus = 'verification_required';
+                                          baseResult.errorMessage = 'OCR auto-solve failed, queued for automatic re-fetch';
+                                          this.log(jobId, `[Tab ${tabId}] ${enrollment}: OCR failed — marked for auto re-fetch`, 'warn');
+                                          return baseResult;
+                                    }
                                     const manualSolved = await this.waitForManualCaptchaOnTab(page, jobId, enrollment, tabId);
                                     if (!manualSolved) {
                                           baseResult.fetchStatus = 'verification_required';
@@ -847,7 +889,14 @@ class ResultFetcherService {
        * the pending enrollment queue concurrently. Each completed tab immediately picks
        * up the next student from the queue.
        */
-      async processConcurrentQueue(job, pendingEnrollments, onResult, onTabUpdate, demoMode = false) {
+      async processConcurrentQueue(job, pendingEnrollments, onResult, onTabUpdate, demoMode = false, options = {}) {
+            // Close any existing pages from previous pass before re-initializing
+            for (const tab of this.tabs) {
+                  if (tab.page && !tab.page.isClosed()) {
+                        await tab.page.close().catch(() => { });
+                  }
+            }
+
             const queue = [...pendingEnrollments];
             const totalToProcess = queue.length;
             const numTabs = Math.min(totalToProcess, this.maxTabs);
@@ -1016,7 +1065,9 @@ class ResultFetcherService {
                   await Promise.all(workers);
 
             } finally {
-                  await this.closeBrowser();
+                  if (!options.keepBrowserOpen) {
+                        await this.closeBrowser();
+                  }
             }
       }
 

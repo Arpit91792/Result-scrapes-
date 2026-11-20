@@ -415,6 +415,29 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
             const job = await FetchJob.findOne({ _id: req.params.jobId, userId: req.user._id });
             if (!job) return res.status(404).json({ error: 'Job not found' });
 
+            const verificationRequiredCount = await StudentResult.countDocuments({
+                  jobId: job._id,
+                  fetchStatus: 'verification_required',
+            });
+            const unresolvedCount = await StudentResult.countDocuments({
+                  jobId: job._id,
+                  fetchStatus: { $nin: ['completed', 'missing'] },
+            });
+            const resolvedCount = await StudentResult.countDocuments({
+                  jobId: job._id,
+                  fetchStatus: { $in: ['completed', 'missing'] },
+            });
+            if (
+                  job.status !== 'completed'
+                  || verificationRequiredCount > 0
+                  || unresolvedCount > 0
+                  || resolvedCount !== job.totalStudents
+            ) {
+                  return res.status(409).json({
+                        error: 'Excel export is available after every student result is fetched or confirmed missing.',
+                  });
+            }
+
             const filter = req.query.filter || 'all'; // 'all' | 'passed' | 'failed'
             const students = await StudentResult.find({ jobId: req.params.jobId });
 

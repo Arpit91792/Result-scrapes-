@@ -9,6 +9,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 const logger = require('./utils/logger');
+const FetchJob = require('./models/FetchJob');
 const authRoutes = require('./routes/auth');
 const resultRoutes = require('./routes/results');
 const { setupSocketHandlers } = require('./socket/socketHandlers');
@@ -80,16 +81,46 @@ server.listen(PORT, '0.0.0.0', () => {
   logger.info(`Server running on port ${PORT}`);
 });
 
-if (process.env.MONGODB_URI) {
-  mongoose.connect(process.env.MONGODB_URI)
-    .then(() => {
-      logger.info('Connected to MongoDB');
-    })
-    .catch(err => {
-      logger.error('MongoDB connection error:', err.message);
-    });
-} else {
-  logger.warn('MONGODB_URI not configured. Database connection skipped.');
+const primaryMongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rgpv_results';
+const fallbackMongoUri = 'mongodb://127.0.0.1:27017/rgpv_results';
+
+async function connectDatabase() {
+  try {
+    await mongoose.connect(primaryMongoUri);
+    logger.info('Connected to MongoDB');
+  } catch (err) {
+    logger.error(`MongoDB connection error: ${err.message}`);
+    if (primaryMongoUri !== fallbackMongoUri) {
+      try {
+        logger.warn(`Attempting fallback to local MongoDB (${fallbackMongoUri})...`);
+        await mongoose.connect(fallbackMongoUri);
+        logger.info('Connected to local fallback MongoDB');
+      } catch (fallbackErr) {
+        logger.error(`Local MongoDB fallback error: ${fallbackErr.message}`);
+      }
+    }
+  }
 }
+
+connectDatabase().then(async () => {
+  if (mongoose.connection.readyState !== 1) return;
+
+  try {
+    const result = await FetchJob.updateMany(
+      { status: 'running' },
+      {
+        $set: {
+          status: 'paused',
+          errorMessage: 'Backend restarted while this job was running. Resume to continue.',
+        },
+      }
+    );
+    if (result.modifiedCount > 0) {
+      logger.warn(`Marked ${result.modifiedCount} interrupted job(s) as paused for resume`);
+    }
+  } catch (err) {
+    logger.error(`Could not recover interrupted jobs: ${err.message}`);
+  }
+});
 
 module.exports = { app, server };

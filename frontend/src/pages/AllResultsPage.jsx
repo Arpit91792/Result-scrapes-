@@ -27,7 +27,7 @@ function CaptchaBanner({ captchaState, onResumeManual }) {
             filling: { bg: 'bg-blue-50 border-blue-300 dark:bg-blue-900/20 dark:border-blue-700', icon: <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />, title: `✏️ Filling CAPTCHA: "${text}"`, sub: 'OCR read the text — submitting form automatically.' },
             solved: { bg: 'bg-green-50 border-green-300 dark:bg-green-900/20 dark:border-green-700', icon: <CheckCircle className="w-5 h-5 text-green-600" />, title: `✅ CAPTCHA solved automatically: "${text}"`, sub: 'OCR succeeded — extracting result data.' },
             wrong: { bg: 'bg-orange-50 border-orange-300 dark:bg-orange-900/20 dark:border-orange-700', icon: <AlertTriangle className="w-5 h-5 text-orange-500" />, title: `⚠️ OCR text "${text}" was wrong — retrying`, sub: 'Fetching fresh CAPTCHA image and re-running OCR.' },
-            failed: { bg: 'bg-red-50 border-red-400 dark:bg-red-900/20 dark:border-red-700', icon: <AlertCircle className="w-5 h-5 text-red-600" />, title: '❌ Auto OCR failed after 5 attempts', sub: 'Please solve the CAPTCHA manually in the browser window, then click Resume.' },
+            failed: { bg: 'bg-amber-50 border-amber-400 dark:bg-amber-900/20 dark:border-amber-700', icon: <AlertCircle className="w-5 h-5 text-amber-600" />, title: '⚠️ OCR verification required', sub: 'Queued for automatic re-fetch after initial run.' },
             completed: { bg: 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-700', icon: <CheckCircle className="w-5 h-5 text-green-600" />, title: '✅ CAPTCHA processing complete', sub: 'Result extracted successfully.' },
       };
 
@@ -40,14 +40,6 @@ function CaptchaBanner({ captchaState, onResumeManual }) {
                         <p className="font-semibold text-sm text-gray-800 dark:text-gray-200">{cfg.title}</p>
                         <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{cfg.sub}</p>
                   </div>
-                  {status === 'failed' && (
-                        <button
-                              onClick={onResumeManual}
-                              className="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold px-4 py-2 rounded-lg flex-shrink-0 flex items-center gap-2"
-                        >
-                              <Play className="w-4 h-4" /> Resume After Manual CAPTCHA
-                        </button>
-                  )}
             </div>
       );
 }
@@ -222,14 +214,10 @@ export default function AllResultsPage() {
                   }
             });
 
-            // Manual fallback required
+            // Manual fallback required - popup removed per user request (automated re-fetch handles verification-required students)
             const offCaptchaReq = onCaptchaRequired(data => {
                   if (String(data.jobId) !== String(jobId)) return;
                   setCaptchaState({ status: 'failed', text: '' });
-                  setManualAlert(true);
-                  toast('⚠️ OCR failed — please solve CAPTCHA manually in browser', {
-                        icon: '🔒', duration: 10000,
-                  });
             });
 
             // Poll while running
@@ -304,7 +292,9 @@ export default function AllResultsPage() {
                   a.click();
                   URL.revokeObjectURL(url);
                   toast.success(`${downloadName} downloaded!`);
-            } catch { toast.error('Export failed — ensure results exist'); }
+            } catch (err) {
+                  toast.error(err.response?.data?.error || 'Export failed — ensure results exist');
+            }
             finally { setExporting(''); }
       };
 
@@ -358,6 +348,9 @@ export default function AllResultsPage() {
       /* ── Derived ───────────────────────────────────────────────────────────────── */
       const p = progress || job;
       const pct = p?.totalStudents ? Math.min(100, Math.round((p.completedCount / p.totalStudents) * 100)) : 0;
+      const excelExportReady = job?.status === 'completed'
+            && p?.status === 'completed'
+            && Number(p?.verificationRequiredCount || 0) === 0;
 
       const statusColorMap = {
             running: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
@@ -422,26 +415,6 @@ export default function AllResultsPage() {
                   {/* ── OCR CAPTCHA Status Banner ── */}
                   {captchaState && (
                         <CaptchaBanner captchaState={captchaState} onResumeManual={handleManualResume} />
-                  )}
-
-                  {/* ── Manual CAPTCHA alert (after OCR failure) ── */}
-                  {manualAlert && !captchaState && (
-                        <div className="bg-red-50 dark:bg-red-900/20 border-2 border-red-400 dark:border-red-700 rounded-xl p-4 flex flex-wrap items-start gap-3">
-                              <AlertCircle className="w-6 h-6 text-red-600 mt-0.5 flex-shrink-0" />
-                              <div className="flex-1 min-w-0">
-                                    <p className="font-bold text-red-800 dark:text-red-300">🔒 Manual CAPTCHA Required</p>
-                                    <p className="text-sm text-red-700 dark:text-red-400 mt-1">
-                                          Automatic OCR failed after 5 attempts. Please solve the CAPTCHA manually in the
-                                          Chromium browser window, then click <strong>Resume After Manual CAPTCHA</strong>.
-                                    </p>
-                              </div>
-                              <button
-                                    onClick={handleManualResume}
-                                    className="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold px-4 py-2 rounded-lg flex-shrink-0 flex items-center gap-2"
-                              >
-                                    <CheckCircle className="w-4 h-4" /> Resume After Manual CAPTCHA
-                              </button>
-                        </div>
                   )}
 
                   {/* ── Active Chrome Tabs & Overall Progress Banner ── */}
@@ -574,13 +547,18 @@ export default function AllResultsPage() {
                         <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
                               <FileSpreadsheet className="w-4 h-4 text-green-600" /> Download Results
                         </h3>
+                        {!excelExportReady && (
+                              <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                                    Excel downloads are available after fetching finishes and CAPTCHA Required reaches 0.
+                              </p>
+                        )}
                         <div className="flex flex-wrap gap-2">
                               {[
                                     { label: 'All Results.xlsx', filter: 'all', fileName: 'All Results.xlsx', cls: 'btn-primary text-xs py-1.5 !bg-green-700 hover:!bg-green-800' },
                                     { label: 'Passed Students.xlsx', filter: 'passed', fileName: 'Passed Students.xlsx', cls: 'btn-primary text-xs py-1.5' },
                                     { label: 'Failed Students.xlsx', filter: 'failed', fileName: 'Failed Students.xlsx', cls: 'btn-danger text-xs py-1.5' },
                               ].map(({ label, filter, fileName, cls }) => (
-                                    <button key={filter} onClick={() => handleExcel(filter, fileName)} disabled={!!exporting} className={cls}>
+                                    <button key={filter} onClick={() => handleExcel(filter, fileName)} disabled={!!exporting || !excelExportReady} className={cls}>
                                           {exporting === filter
                                                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                                 : <Download className="w-3.5 h-3.5" />}

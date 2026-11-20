@@ -7,7 +7,7 @@ import {
 import api from '../services/api';
 import toast from 'react-hot-toast';
 
-const BRANCHES = ['CSE', 'IT', 'EC', 'EX', 'ME', 'CE', 'EE', 'CH', 'BT', 'Civil', 'Arch', 'Pharma', 'Other'];
+const BRANCHES = ['CSE', 'IT', 'AIML', 'CSBS', 'CY', 'EC', 'EX', 'ME', 'CE', 'EE', 'CH', 'BT', 'Civil', 'Arch', 'Pharma', 'Other'];
 
 // Full RGPV programme list — matches ProgramSelect.aspx labels exactly
 const COURSES = [
