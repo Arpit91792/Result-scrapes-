@@ -181,4 +181,5 @@ module.exports = {
   queueJobForWorker,
   removeQueuedJob,
   sendWorkerCommand,
+  recoverQueuedJobs,
 };
