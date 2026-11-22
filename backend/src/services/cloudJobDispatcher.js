@@ -5,6 +5,7 @@ const {
   removeQueuedJob,
   sendWorkerCommand,
   waitForWorkerJobFinished,
+  cancelWorkerFinishWait,
 } = require('../socket/socketHandlers');
 const logger = require('../utils/logger');
 
@@ -164,6 +165,7 @@ class CloudJobDispatcher {
     const sent = sendWorkerCommand(jobId, 'cancel');
     if (!sent) {
       // No worker is running this job; remove it from the queue and cancel it in-place.
+      cancelWorkerFinishWait(jobId);
       removeQueuedJob(jobId);
       job.status = 'cancelled';
       job.errorMessage = 'Job cancelled before cloud execution.';
