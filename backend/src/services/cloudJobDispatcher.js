@@ -118,10 +118,12 @@ class CloudJobDispatcher {
     if (!job) throw new Error('Job not found');
 
     const sent = sendWorkerCommand(jobId, 'pause');
-    if (!sent) removeQueuedJob(jobId);
-    job.status = 'paused';
-    await job.save();
-    this.emitProgress(jobId, job, { message: 'Job paused' });
+    if (!sent) {
+      removeQueuedJob(jobId);
+      job.status = 'paused';
+      await job.save();
+      this.emitProgress(jobId, job, { message: 'Job paused' });
+    }
     return job;
   }
 
@@ -134,10 +136,7 @@ class CloudJobDispatcher {
 
     const sent = sendWorkerCommand(jobId, 'resume');
     if (sent) {
-      job.status = 'running';
-      job.errorMessage = null;
-      await job.save();
-      this.emitProgress(jobId, job, { message: 'Job resumed on cloud worker' });
+      // The worker updates the persisted status after it applies the command.
       return job;
     }
 
