@@ -27,6 +27,7 @@ const fetchJobSchema = new mongoose.Schema({
   verificationRequiredCount: { type: Number, default: 0 },
   failedRequestsCount: { type: Number, default: 0 },
   currentEnrollment: { type: String },
+  assignedWorkerId: { type: String, index: true },
   status: {
     type: String,
     enum: ['pending', 'queued', 'running', 'paused', 'completed', 'cancelled', 'failed'],
