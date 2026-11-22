@@ -53,6 +53,8 @@ let processor = null;
 let activeJobId = null;
 let monitorTimer = null;
 let heartbeatTimer = null;
+let isStartingJob = false;
+const pendingControls = [];
 
 const ioAdapter = {
   to(room) {
@@ -85,6 +87,8 @@ async function releaseWorker(jobId) {
   clearInterval(monitorTimer);
   monitorTimer = null;
   activeJobId = null;
+  isStartingJob = false;
+  pendingControls.length = 0;
   socket?.emit('worker_job_finished', { jobId: String(jobId) });
 }
 
@@ -100,6 +104,20 @@ async function monitorJob(jobId) {
   }, 2500);
 }
 
+async function applyWorkerControl({ jobId, command, tabId } = {}) {
+  try {
+    if (command === 'pause') await processor.pauseJob(jobId);
+    else if (command === 'resume') await processor.resumeJob(jobId);
+    else if (command === 'cancel') await processor.cancelJob(jobId);
+    else if (command === 'captcha_resolved') {
+      const fetcher = processor.getActiveFetcher(jobId);
+      if (fetcher) fetcher.resolveCaptchaWait(tabId || null);
+    }
+  } catch (err) {
+    logger.error(`Worker control ${command} failed for ${jobId}: ${err.message}`);
+  }
+}
+
 function attachSocketHandlers() {
   socket.on('connect', () => {
     logger.info(`Connected as cloud worker ${workerId}; adaptive tabs: ${adaptiveTabs}`);
@@ -110,16 +128,24 @@ function attachSocketHandlers() {
     if (!jobId || activeJobId) return;
     activeJobId = String(jobId);
     processor = new JobProcessor(ioAdapter);
+    isStartingJob = true;
     try {
       const job = await FetchJob.findById(activeJobId);
-      if (!job || job.status !== 'queued') throw new Error('Assigned job is no longer queued');
-      job.status = 'running';
-      job.errorMessage = null;
+      if (!job || !['queued', 'paused'].includes(job.status)) throw new Error('Assigned job is no longer queued or paused');
       job.assignedWorkerId = workerId;
       await job.save();
+
+      // JobProcessor owns the running transition and starts the browser run.
       await processor.startJob(activeJobId, Boolean(demoMode));
+      isStartingJob = false;
+
+      while (pendingControls.length) {
+        const control = pendingControls.shift();
+        await applyWorkerControl(control);
+      }
       await monitorJob(activeJobId);
     } catch (err) {
+      isStartingJob = false;
       logger.error(`Could not start cloud job ${activeJobId}: ${err.message}`);
       await FetchJob.findByIdAndUpdate(activeJobId, {
         $set: { status: 'failed', errorMessage: err.message },
@@ -128,19 +154,13 @@ function attachSocketHandlers() {
     }
   });
 
-  socket.on('worker_control', async ({ jobId, command, tabId } = {}) => {
-    if (!jobId || String(jobId) !== activeJobId || !processor) return;
-    try {
-      if (command === 'pause') await processor.pauseJob(jobId);
-      else if (command === 'resume') await processor.resumeJob(jobId);
-      else if (command === 'cancel') await processor.cancelJob(jobId);
-      else if (command === 'captcha_resolved') {
-        const fetcher = processor.getActiveFetcher(jobId);
-        if (fetcher) fetcher.resolveCaptchaWait(tabId || null);
-      }
-    } catch (err) {
-      logger.error(`Worker control ${command} failed for ${jobId}: ${err.message}`);
+  socket.on('worker_control', async (control = {}) => {
+    if (!control.jobId || String(control.jobId) !== activeJobId || !processor) return;
+    if (isStartingJob) {
+      pendingControls.push(control);
+      return;
     }
+    await applyWorkerControl(control);
   });
 
   socket.on('disconnect', () => logger.warn('Cloud worker disconnected; Socket.IO will reconnect'));
