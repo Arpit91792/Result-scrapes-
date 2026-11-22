@@ -14,7 +14,7 @@ const User = require('./models/User');
 const authRoutes = require('./routes/auth');
 const resultRoutes = require('./routes/results');
 const trConverterRoutes = require('./routes/trConverter');
-const { setupSocketHandlers } = require('./socket/socketHandlers');
+const { setupSocketHandlers, recoverQueuedJobs } = require('./socket/socketHandlers');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -160,14 +160,16 @@ connectDatabase().then(async () => {
       { status: 'running' },
       {
         $set: {
-          status: 'paused',
-          errorMessage: 'Backend restarted while this job was running. Resume to continue.',
+          status: 'queued',
+          errorMessage: 'API restarted. Unfinished students have been re-queued for a cloud worker.',
         },
+        $unset: { assignedWorkerId: 1 },
       }
     );
     if (result.modifiedCount > 0) {
-      logger.warn(`Marked ${result.modifiedCount} interrupted job(s) as paused for resume`);
+      logger.warn(`Re-queued ${result.modifiedCount} interrupted job(s) for cloud workers`);
     }
+    await recoverQueuedJobs();
   } catch (err) {
     logger.error(`Could not recover interrupted jobs: ${err.message}`);
   }
