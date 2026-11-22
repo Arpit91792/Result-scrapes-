@@ -215,8 +215,16 @@ class ResultFetcherService {
             try {
                   const img = await this.findCaptchaImg(page);
                   if (img) {
-                        await img.click();
-                        await this.delay(800);
+                        const oldSrc = await img.getAttribute('src').catch(() => null);
+                        await img.click().catch(() => {});
+                        // Wait for RGPV to load a new image URL or wait 1.5 seconds
+                        const start = Date.now();
+                        while (Date.now() - start < 2000) {
+                              await this.delay(300);
+                              const newSrc = await img.getAttribute('src').catch(() => null);
+                              if (newSrc && newSrc !== oldSrc) break;
+                        }
+                        await this.delay(400);
                   }
             } catch { /* ignore */ }
       }
@@ -585,9 +593,9 @@ class ResultFetcherService {
                   const ocrText = await solveCaptchaFromElement(captchaImg)
                         || await solveCaptchaFromElement(page, CAPTCHA_IMG_SELECTORS);
 
-                  if (!ocrText || ocrText.length < 3) {
-                        this.log(jobId, `[Tab ${tabId}] OCR returned empty/short text: "${ocrText}", retrying...`, 'warn');
-                        await this.delay(1000);
+                  // RGPV CAPTCHA is strictly 5 characters. Do not submit short or incomplete strings.
+                  if (!ocrText || ocrText.length !== 5) {
+                        this.log(jobId, `[Tab ${tabId}] OCR returned non-5-char text: "${ocrText || ''}", refreshing CAPTCHA image...`, 'warn');
                         await this._refreshCaptcha(page);
                         continue;
                   }
@@ -790,15 +798,17 @@ class ResultFetcherService {
                                     continue;
                               } else {
                                     if (process.env.HEADLESS_BROWSER !== 'false') {
-                                          baseResult.fetchStatus = 'verification_required';
+                                          baseResult.fetchStatus = 'pending';
                                           baseResult.errorMessage = 'OCR auto-solve failed, queued for automatic re-fetch';
-                                          this.log(jobId, `[Tab ${tabId}] ${enrollment}: OCR failed — marked for auto re-fetch`, 'warn');
+                                          this.log(jobId, `[Tab ${tabId}] ${enrollment}: OCR failed — resetting form for clean re-fetch`, 'warn');
+                                          await this.clickReset(page);
                                           return baseResult;
                                     }
                                     const manualSolved = await this.waitForManualCaptchaOnTab(page, jobId, enrollment, tabId);
                                     if (!manualSolved) {
-                                          baseResult.fetchStatus = 'verification_required';
-                                          baseResult.errorMessage = 'CAPTCHA verification timed out';
+                                          baseResult.fetchStatus = 'pending';
+                                          baseResult.errorMessage = 'CAPTCHA verification timed out, marked as pending';
+                                          await this.clickReset(page);
                                           return baseResult;
                                     }
                                     await this.delay(1500);
@@ -890,30 +900,52 @@ class ResultFetcherService {
        * up the next student from the queue.
        */
       async processConcurrentQueue(job, pendingEnrollments, onResult, onTabUpdate, demoMode = false, options = {}) {
-            // Close any existing pages from previous pass before re-initializing
-            for (const tab of this.tabs) {
-                  if (tab.page && !tab.page.isClosed()) {
-                        await tab.page.close().catch(() => { });
-                  }
-            }
-
             const queue = [...pendingEnrollments];
             const totalToProcess = queue.length;
             const numTabs = Math.min(totalToProcess, this.maxTabs);
+            const reusableTabs = options.reuseTabs && this.browser && this.browser.isConnected()
+                  ? this.tabs.filter(tab => tab.page && !tab.page.isClosed()).slice(0, numTabs)
+                  : [];
+            const reuseExistingTabs = reusableTabs.length === numTabs;
+
+            if (reuseExistingTabs) {
+                  for (const tab of this.tabs) {
+                        if (!reusableTabs.includes(tab) && tab.page && !tab.page.isClosed()) {
+                              await tab.page.close().catch(() => { });
+                        }
+                  }
+            } else {
+                  for (const tab of this.tabs) {
+                        if (tab.page && !tab.page.isClosed()) {
+                              await tab.page.close().catch(() => { });
+                        }
+                  }
+            }
 
             this.log(job._id, `Starting concurrent queue: ${totalToProcess} students with ${numTabs} tabs in 1 Chrome window`);
 
             // Initialize tab state registry
-            this.tabs = [];
-            for (let i = 0; i < numTabs; i++) {
-                  this.tabs.push({
-                        tabId: i + 1,
-                        tabName: `Tab ${i + 1}`,
-                        page: null,
+            if (reuseExistingTabs) {
+                  this.tabs = reusableTabs.map((tab, index) => ({
+                        ...tab,
+                        tabId: index + 1,
+                        tabName: `Tab ${index + 1}`,
                         enrollmentNumber: null,
                         status: 'Waiting',
                         message: 'Standing by',
-                  });
+                  }));
+            } else {
+                  this.tabs = [];
+                  for (let i = 0; i < numTabs; i++) {
+                        this.tabs.push({
+                              tabId: i + 1,
+                              tabName: `Tab ${i + 1}`,
+                              page: null,
+                              enrollmentNumber: null,
+                              status: 'Waiting',
+                              message: 'Standing by',
+                        });
+                  }
             }
 
             onTabUpdate(this.getTabsStatus());
@@ -962,33 +994,41 @@ class ResultFetcherService {
             try {
                   await this.launchBrowser();
 
-                  // Create Tab 1 first and resolve the entry URL
-                  const firstPage = await this.context.newPage();
-                  firstPage.setDefaultTimeout(PAGE_TIMEOUT);
-                  this.setupDialogHandlerForPage(firstPage, 1);
-                  this.tabs[0].page = firstPage;
-
-                  this.tabs[0].status = 'Processing';
-                  this.tabs[0].message = 'Resolving portal entry form';
-                  onTabUpdate(this.getTabsStatus());
-
-                  const initNav = await this.resolveInitialEntryUrl(firstPage, job, job._id);
-                  if (!initNav.success && !this._resolvedEntryUrl) {
-                        throw new Error(`Failed to initialize portal entry form: ${initNav.error}`);
-                  }
-
-                  // Spawn the remaining tabs in the SAME single window
-                  for (let i = 1; i < numTabs; i++) {
-                        const page = await this.context.newPage();
-                        page.setDefaultTimeout(PAGE_TIMEOUT);
-                        this.setupDialogHandlerForPage(page, i + 1);
-                        this.tabs[i].page = page;
-
-                        // Navigate each tab to the resolved entry URL with a slight stagger
-                        if (this._resolvedEntryUrl) {
-                              page.goto(this._resolvedEntryUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT }).catch(() => { });
+                  if (reuseExistingTabs) {
+                        this.log(job._id, `Reusing ${numTabs} existing tabs in the same Chrome window`);
+                        for (const tab of this.tabs) {
+                              tab.page.setDefaultTimeout(PAGE_TIMEOUT);
+                              this.setupDialogHandlerForPage(tab.page, tab.tabId);
                         }
-                        await this.delay(200);
+                  } else {
+                        // Create Tab 1 first and resolve the entry URL
+                        const firstPage = await this.context.newPage();
+                        firstPage.setDefaultTimeout(PAGE_TIMEOUT);
+                        this.setupDialogHandlerForPage(firstPage, 1);
+                        this.tabs[0].page = firstPage;
+
+                        this.tabs[0].status = 'Processing';
+                        this.tabs[0].message = 'Resolving portal entry form';
+                        onTabUpdate(this.getTabsStatus());
+
+                        const initNav = await this.resolveInitialEntryUrl(firstPage, job, job._id);
+                        if (!initNav.success && !this._resolvedEntryUrl) {
+                              throw new Error(`Failed to initialize portal entry form: ${initNav.error}`);
+                        }
+
+                        // Spawn the remaining tabs in the SAME single window
+                        for (let i = 1; i < numTabs; i++) {
+                              const page = await this.context.newPage();
+                              page.setDefaultTimeout(PAGE_TIMEOUT);
+                              this.setupDialogHandlerForPage(page, i + 1);
+                              this.tabs[i].page = page;
+
+                              // Navigate each tab to the resolved entry URL with a slight stagger
+                              if (this._resolvedEntryUrl) {
+                                    page.goto(this._resolvedEntryUrl, { waitUntil: 'domcontentloaded', timeout: PAGE_TIMEOUT }).catch(() => { });
+                              }
+                              await this.delay(200);
+                        }
                   }
 
                   this.log(job._id, `✓ All ${numTabs} tabs open and ready in single Chrome window`);
@@ -1026,9 +1066,9 @@ class ResultFetcherService {
                                     } else if (resultData.fetchStatus === 'missing' || resultData.resultStatus === 'NOT_FOUND') {
                                           tab.status = 'Not Found';
                                           tab.message = 'Result not found on portal';
-                                    } else if (resultData.fetchStatus === 'verification_required') {
-                                          tab.status = 'CAPTCHA Required';
-                                          tab.message = 'Verification timed out';
+                                    } else if (resultData.fetchStatus === 'verification_required' || resultData.fetchStatus === 'pending') {
+                                          tab.status = 'Pending';
+                                          tab.message = resultData.errorMessage || 'Pending / CAPTCHA retry';
                                     } else if (resultData.fetchStatus === 'network_error' || resultData.fetchStatus === 'portal_error') {
                                           tab.status = 'Network Error';
                                           tab.message = resultData.errorMessage || 'Network error';

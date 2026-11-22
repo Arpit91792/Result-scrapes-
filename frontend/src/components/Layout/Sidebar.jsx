@@ -1,13 +1,15 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import {
       Home, LayoutDashboard, Search, List, BarChart3,
-      Download, Settings, Shield, X, GraduationCap, FileText
+      Download, Settings, Shield, X, GraduationCap, FileText, FileSpreadsheet
 } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
 
 const navItems = [
       { to: '/', label: 'Home', icon: Home, end: true },
       { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
       { to: '/fetch-results', label: 'Fetch Results', icon: Search },
+      { to: '/tr-converter', label: 'TR Converter', icon: FileSpreadsheet },
       { to: '/enrollment-preview', label: 'Enrollment Preview', icon: List },
       { to: '/analytics', label: 'Analytics', icon: BarChart3 },
       { to: '/downloads', label: 'Download History', icon: Download },
@@ -16,6 +18,9 @@ const navItems = [
 ];
 
 export default function Sidebar({ open, onClose }) {
+      const { user } = useAuth();
+      const visibleNavItems = navItems.filter(item => item.to !== '/admin' || user?.role === 'admin');
+
       return (
             <>
                   {/* Overlay */}
@@ -52,7 +57,7 @@ export default function Sidebar({ open, onClose }) {
 
                         {/* Nav */}
                         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-                              {navItems.map((item) => (
+                              {visibleNavItems.map((item) => (
                                     <NavLink
                                           key={item.to}
                                           to={item.to}

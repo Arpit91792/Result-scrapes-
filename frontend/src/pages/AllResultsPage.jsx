@@ -5,7 +5,7 @@ import {
       Download, Pause, Play, StopCircle, RefreshCw, Search,
       ChevronUp, ChevronDown, Eye, Wifi, WifiOff, Terminal,
       FileSpreadsheet, Archive, ExternalLink, Loader2, ScanLine, Brain,
-      Layers, Monitor, Activity, Trash2
+      Trash2
 } from 'lucide-react';
 import api from '../services/api';
 import {
@@ -20,11 +20,10 @@ function CaptchaBanner({ captchaState, onResumeManual }) {
       if (!captchaState) return null;
 
       const { status, text, manual } = captchaState;
+      if (status === 'filling' || status === 'solving' || status === 'wrong') return null;
 
       const configs = {
             detected: { bg: 'bg-blue-50 border-blue-300 dark:bg-blue-900/20 dark:border-blue-700', icon: <ScanLine className="w-5 h-5 text-blue-600" />, title: '🔍 CAPTCHA detected — starting OCR...', sub: 'Tesseract OCR is reading the CAPTCHA image.' },
-            solving: { bg: 'bg-yellow-50 border-yellow-300 dark:bg-yellow-900/20 dark:border-yellow-700', icon: <Brain className="w-5 h-5 text-yellow-600 animate-pulse" />, title: `🧠 OCR solving... ${text || ''}`, sub: 'Preprocessing image and running text recognition.' },
-            filling: { bg: 'bg-blue-50 border-blue-300 dark:bg-blue-900/20 dark:border-blue-700', icon: <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />, title: `✏️ Filling CAPTCHA: "${text}"`, sub: 'OCR read the text — submitting form automatically.' },
             solved: { bg: 'bg-green-50 border-green-300 dark:bg-green-900/20 dark:border-green-700', icon: <CheckCircle className="w-5 h-5 text-green-600" />, title: `✅ CAPTCHA solved automatically: "${text}"`, sub: 'OCR succeeded — extracting result data.' },
             wrong: { bg: 'bg-orange-50 border-orange-300 dark:bg-orange-900/20 dark:border-orange-700', icon: <AlertTriangle className="w-5 h-5 text-orange-500" />, title: `⚠️ OCR text "${text}" was wrong — retrying`, sub: 'Fetching fresh CAPTCHA image and re-running OCR.' },
             failed: { bg: 'bg-amber-50 border-amber-400 dark:bg-amber-900/20 dark:border-amber-700', icon: <AlertCircle className="w-5 h-5 text-amber-600" />, title: '⚠️ OCR verification required', sub: 'Queued for automatic re-fetch after initial run.' },
@@ -82,7 +81,8 @@ function TabStatusBadge({ status }) {
       const configs = {
             Processing: { cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200', icon: <Loader2 className="w-3 h-3 animate-spin mr-1" /> },
             Completed: { cls: 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300 border-green-200', icon: <CheckCircle className="w-3 h-3 mr-1" /> },
-            'CAPTCHA Required': { cls: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 border-purple-200', icon: <AlertTriangle className="w-3 h-3 mr-1" /> },
+            'CAPTCHA Required': { cls: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200', icon: <Clock className="w-3 h-3 mr-1" /> },
+            Pending: { cls: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200', icon: <Clock className="w-3 h-3 mr-1" /> },
             'Network Error': { cls: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 border-red-200', icon: <XCircle className="w-3 h-3 mr-1" /> },
             'Not Found': { cls: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300 border-orange-200', icon: <AlertCircle className="w-3 h-3 mr-1" /> },
             Failed: { cls: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 border-red-200', icon: <XCircle className="w-3 h-3 mr-1" /> },
@@ -350,6 +350,7 @@ export default function AllResultsPage() {
       const pct = p?.totalStudents ? Math.min(100, Math.round((p.completedCount / p.totalStudents) * 100)) : 0;
       const excelExportReady = job?.status === 'completed'
             && p?.status === 'completed'
+            && Number(p?.pendingCount || 0) === 0
             && Number(p?.verificationRequiredCount || 0) === 0;
 
       const statusColorMap = {
@@ -417,41 +418,6 @@ export default function AllResultsPage() {
                         <CaptchaBanner captchaState={captchaState} onResumeManual={handleManualResume} />
                   )}
 
-                  {/* ── Active Chrome Tabs & Overall Progress Banner ── */}
-                  <div className="bg-gradient-to-r from-slate-900 via-navy-900 to-slate-900 text-white rounded-xl p-4 shadow-md border border-slate-700/60 flex flex-wrap items-center justify-between gap-4">
-                        <div className="flex items-center gap-3">
-                              <div className="p-2.5 bg-blue-500/20 text-blue-400 rounded-lg border border-blue-400/30 flex-shrink-0">
-                                    <Layers className="w-5 h-5" />
-                              </div>
-                              <div>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                          <h2 className="text-sm font-semibold tracking-wide uppercase text-slate-200">
-                                                Active Browser Tabs (Headless Background)
-                                          </h2>
-                                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-400/40">
-                                                Active Tabs: {p?.activeTabsCount ?? (tabs.length || (p?.status === 'running' ? (p?.maxTabs || 100) : 0))} / {p?.maxTabs || 100}
-                                          </span>
-                                    </div>
-                                    <p className="text-xs text-slate-400 mt-1">
-                                          Operating {p?.maxTabs || 100} concurrent tabs in the background with automatic tab reuse upon student completion.
-                                    </p>
-                              </div>
-                        </div>
-
-                        <div className="flex items-center gap-6">
-                              <div className="text-right">
-                                    <p className="text-xs text-slate-400 font-medium">Overall Progress</p>
-                                    <p className="text-base font-bold text-white font-mono">
-                                          {Math.min(p?.completedCount ?? 0, p?.totalStudents ?? 0)} / {p?.totalStudents ?? 0}
-                                    </p>
-                              </div>
-                              <div className="text-right">
-                                    <p className="text-xs text-slate-400 font-medium">Completion Rate</p>
-                                    <p className="text-base font-bold text-emerald-400 font-mono">{pct}%</p>
-                              </div>
-                        </div>
-                  </div>
-
                   {/* ── Progress bar ── */}
                   <div className="card">
                         <div className="flex items-center justify-between mb-2">
@@ -460,16 +426,6 @@ export default function AllResultsPage() {
                                     {p?.currentEnrollment && p?.status === 'running' && (
                                           <span className="font-mono text-xs text-gray-400 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">
                                                 Active Queue: {p.currentEnrollment}
-                                          </span>
-                                    )}
-                                    {captchaState?.status === 'solving' && (
-                                          <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                                <Brain className="w-3 h-3 animate-pulse" /> OCR solving CAPTCHA...
-                                          </span>
-                                    )}
-                                    {captchaState?.status === 'filling' && (
-                                          <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full flex items-center gap-1">
-                                                <Loader2 className="w-3 h-3 animate-spin" /> Filling: &quot;{captchaState.text}&quot;
                                           </span>
                                     )}
                               </div>

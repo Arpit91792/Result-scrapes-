@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { GraduationCap, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
@@ -7,7 +7,7 @@ import toast from 'react-hot-toast';
 export default function LoginPage() {
       const { login } = useAuth();
       const navigate = useNavigate();
-      const [form, setForm] = useState({ email: '', password: '' });
+      const [form, setForm] = useState({ identifier: '', password: '' });
       const [showPass, setShowPass] = useState(false);
       const [loading, setLoading] = useState(false);
 
@@ -15,7 +15,7 @@ export default function LoginPage() {
             e.preventDefault();
             setLoading(true);
             try {
-                  await login(form.email, form.password);
+                  await login(form.identifier, form.password);
                   toast.success('Welcome back!');
                   navigate('/dashboard');
             } catch (err) {
@@ -43,13 +43,13 @@ export default function LoginPage() {
 
                               <form onSubmit={handleSubmit} className="space-y-4">
                                     <div>
-                                          <label className="label">Email Address</label>
+                                          <label className="label">Email or Username</label>
                                           <input
-                                                type="email"
+                                                type="text"
                                                 className="input"
-                                                placeholder="college@example.com"
-                                                value={form.email}
-                                                onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                                                placeholder="college@example.com or username"
+                                                value={form.identifier}
+                                                onChange={e => setForm(f => ({ ...f, identifier: e.target.value }))}
                                                 required
                                           />
                                     </div>
@@ -80,12 +80,6 @@ export default function LoginPage() {
                                     </button>
                               </form>
 
-                              <p className="text-center text-sm text-gray-500 dark:text-gray-400 mt-6">
-                                    Don't have an account?{' '}
-                                    <Link to="/register" className="text-primary-600 dark:text-primary-400 font-medium hover:underline">
-                                          Register here
-                                    </Link>
-                              </p>
                         </div>
 
                         <p className="text-center text-white/40 text-xs mt-6">

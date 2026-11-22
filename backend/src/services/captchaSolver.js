@@ -196,26 +196,23 @@ async function solveCaptchaFromBuffer(buffer) {
                   return tRaw;
             }
 
-            // Fallback: pick the best candidate >= 3 chars
-            const candidates = [
+            // Check for strict 5-character match with good confidence
+            const exactCandidates = [
                   { text: t1, conf: r1.data.confidence || 0 },
                   { text: t2, conf: r2.data.confidence || 0 },
                   { text: tRaw, conf: rRaw.data.confidence || 0 },
-            ].filter(c => c.text && c.text.length >= 3);
+            ].filter(c => c.text && c.text.length === 5);
 
-            if (candidates.length > 0) {
-                  candidates.sort((a, b) => {
-                        const scoreA = (a.text.length === 5 ? 100 : a.text.length) + a.conf;
-                        const scoreB = (b.text.length === 5 ? 100 : b.text.length) + b.conf;
-                        return scoreB - scoreA;
-                  });
-                  logger.info(`CAPTCHA OCR (fallback best): "${candidates[0].text}" conf=${candidates[0].conf.toFixed(1)}%`);
-                  return candidates[0].text;
+            if (exactCandidates.length > 0) {
+                  exactCandidates.sort((a, b) => b.conf - a.conf);
+                  logger.info(`CAPTCHA OCR (5-char best): "${exactCandidates[0].text}" conf=${exactCandidates[0].conf.toFixed(1)}%`);
+                  return exactCandidates[0].text;
             }
 
-            const fallback = t1 || t2 || tRaw || null;
-            logger.warn(`CAPTCHA OCR unable to get 5 chars, returning: "${fallback}"`);
-            return fallback;
+            // If none of the passes returned exactly 5 characters, do NOT return partial junk
+            // (e.g. 3 or 4 characters like "QDP" will be rejected by RGPV 100% of the time).
+            logger.warn(`CAPTCHA OCR did not produce a valid 5-char text (got: "${t1}", "${t2}", "${tRaw}"). Refreshing image.`);
+            return null;
       } catch (err) {
             logger.error('solveCaptchaFromBuffer error:', err.message);
             return null;

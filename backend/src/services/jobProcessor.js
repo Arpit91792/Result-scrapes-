@@ -147,7 +147,7 @@ class JobProcessor {
                   if (res.fetchStatus === 'missing' || res.resultStatus === 'NOT_FOUND') {
                         missingCount++;
                   }
-                  if (res.fetchStatus === 'verification_required') {
+                  if (res.fetchStatus === 'verification_required' || (res.fetchStatus === 'pending' && res.errorMessage && res.errorMessage.includes('CAPTCHA'))) {
                         verificationRequiredCount++;
                   }
                   if (res.fetchStatus === 'network_error' || res.fetchStatus === 'portal_error') {
@@ -212,7 +212,7 @@ class JobProcessor {
                               if (resultData.fetchStatus === 'missing' || resultData.resultStatus === 'NOT_FOUND') {
                                     incUpdates.missingCount = 1;
                               }
-                              if (resultData.fetchStatus === 'verification_required') {
+                              if (resultData.fetchStatus === 'verification_required' || (resultData.fetchStatus === 'pending' && resultData.errorMessage && resultData.errorMessage.includes('CAPTCHA'))) {
                                     incUpdates.verificationRequiredCount = 1;
                               }
                               if (resultData.fetchStatus === 'network_error' || resultData.fetchStatus === 'portal_error') {
@@ -311,20 +311,23 @@ class JobProcessor {
                   executionError = err;
             }
 
-            // Keep retrying only CAPTCHA-required students, giving each pass a fresh browser.
+            // Retry unresolved students in the existing browser window.
             isRetryRound = true;
             let retryRound = 1;
 
             while (!activeFetcher.isCancelled) {
-                  const verificationDocs = await StudentResult.find({
+                  const retryDocs = await StudentResult.find({
                         jobId,
-                        fetchStatus: 'verification_required'
+                        $or: [
+                              { fetchStatus: 'verification_required' },
+                              { fetchStatus: 'pending' }
+                        ]
                   }).select('enrollmentNumber');
 
-                  if (verificationDocs.length === 0) break;
+                  if (retryDocs.length === 0) break;
 
-                  const retryEnrollments = verificationDocs.map(d => d.enrollmentNumber);
-                  const retryMsg = `Found ${retryEnrollments.length} student(s) requiring verification. Re-fetching in a fresh browser window (Pass ${retryRound})...`;
+                  const retryEnrollments = retryDocs.map(d => d.enrollmentNumber);
+                  const retryMsg = `Found ${retryEnrollments.length} pending student(s) requiring verification. Re-fetching in the existing browser window (Pass ${retryRound})...`;
                   logger.info(`Job ${jobId}: ${retryMsg}`);
 
                   this.emitProgress(jobId, job, {
@@ -334,22 +337,13 @@ class JobProcessor {
                   });
 
                   try {
-                        const previousFetcher = activeFetcher;
-                        await previousFetcher.closeBrowser();
-                        if (previousFetcher.isCancelled) break;
-
-                        activeFetcher = new ResultFetcherService(this.io);
-                        if (previousFetcher.isPaused) activeFetcher.pause();
-                        activeJobs.set(String(jobId), activeFetcher);
-                        registerFetcher(jobId, activeFetcher);
-
                         await activeFetcher.processConcurrentQueue(
                               job,
                               retryEnrollments,
                               onResult,
                               onTabUpdate,
                               demoMode,
-                              { keepBrowserOpen: true }
+                              { keepBrowserOpen: true, reuseTabs: true }
                         );
                         executionError = null;
                   } catch (retryErr) {

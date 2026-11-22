@@ -415,9 +415,9 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
             const job = await FetchJob.findOne({ _id: req.params.jobId, userId: req.user._id });
             if (!job) return res.status(404).json({ error: 'Job not found' });
 
-            const verificationRequiredCount = await StudentResult.countDocuments({
+            const pendingUnresolvedCount = await StudentResult.countDocuments({
                   jobId: job._id,
-                  fetchStatus: 'verification_required',
+                  fetchStatus: { $in: ['verification_required', 'pending'] },
             });
             const unresolvedCount = await StudentResult.countDocuments({
                   jobId: job._id,
@@ -429,7 +429,7 @@ router.get('/export/:jobId/excel', authenticate, async (req, res, next) => {
             });
             if (
                   job.status !== 'completed'
-                  || verificationRequiredCount > 0
+                  || pendingUnresolvedCount > 0
                   || unresolvedCount > 0
                   || resolvedCount !== job.totalStudents
             ) {

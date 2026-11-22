@@ -23,8 +23,8 @@ export function AuthProvider({ children }) {
             }
       }, []);
 
-      const login = useCallback(async (email, password) => {
-            const res = await api.post('/auth/login', { email, password });
+      const login = useCallback(async (identifier, password) => {
+            const res = await api.post('/auth/login', { identifier, password });
             const { token, user } = res.data;
             localStorage.setItem('token', token);
             api.defaults.headers.common['Authorization'] = `Bearer ${token}`;

@@ -10,8 +10,10 @@ const path = require('path');
 
 const logger = require('./utils/logger');
 const FetchJob = require('./models/FetchJob');
+const User = require('./models/User');
 const authRoutes = require('./routes/auth');
 const resultRoutes = require('./routes/results');
+const trConverterRoutes = require('./routes/trConverter');
 const { setupSocketHandlers } = require('./socket/socketHandlers');
 
 const app = express();
@@ -49,6 +51,7 @@ app.use('/exports', express.static(path.join(__dirname, '../exports')));
 // ── API Routes ─────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/results', resultRoutes);
+app.use('/api/tr-converter', trConverterRoutes);
 
 // ── Health ─────────────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
@@ -84,6 +87,46 @@ server.listen(PORT, '0.0.0.0', () => {
 const primaryMongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rgpv_results';
 const fallbackMongoUri = 'mongodb://127.0.0.1:27017/rgpv_results';
 
+async function ensureConfiguredAdmin() {
+  const username = process.env.ADMIN_USERNAME;
+  const password = process.env.ADMIN_PASSWORD;
+  if (!username && !password) return;
+  if (!username || !password) {
+    logger.error('Both ADMIN_USERNAME and ADMIN_PASSWORD must be configured to seed the admin account');
+    return;
+  }
+
+  const existingAdmin = await User.findOne({ username });
+  if (existingAdmin) {
+    if (existingAdmin.role !== 'admin') {
+      logger.error(`Configured admin username "${username}" already belongs to a non-admin account`);
+    } else if (process.env.ADMIN_EMAIL && existingAdmin.email !== process.env.ADMIN_EMAIL.toLowerCase()) {
+      const emailInUse = await User.exists({
+        email: process.env.ADMIN_EMAIL.toLowerCase(),
+        _id: { $ne: existingAdmin._id },
+      });
+      if (emailInUse) {
+        logger.error('Could not update configured admin email because it is already in use');
+      } else {
+        existingAdmin.email = process.env.ADMIN_EMAIL.toLowerCase();
+        await existingAdmin.save();
+        logger.info(`Updated configured admin email for "${username}"`);
+      }
+    }
+    return;
+  }
+
+  const email = process.env.ADMIN_EMAIL || `${username}@example.com`;
+  if (await User.exists({ email })) {
+    logger.error(`Could not create configured admin account: email "${email}" is already in use`);
+    return;
+  }
+
+  const admin = new User({ username, email, passwordHash: password, role: 'admin' });
+  await admin.save();
+  logger.info(`Created configured admin account "${username}"`);
+}
+
 async function connectDatabase() {
   try {
     await mongoose.connect(primaryMongoUri);
@@ -104,6 +147,12 @@ async function connectDatabase() {
 
 connectDatabase().then(async () => {
   if (mongoose.connection.readyState !== 1) return;
+
+  try {
+    await ensureConfiguredAdmin();
+  } catch (err) {
+    logger.error(`Could not initialize configured admin account: ${err.message}`);
+  }
 
   try {
     const result = await FetchJob.updateMany(

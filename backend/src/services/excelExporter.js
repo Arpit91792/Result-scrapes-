@@ -338,8 +338,8 @@ function analyzeResults(job, students = []) {
 
       const eligibleOverall = Math.max(0, totalRoster - excludedDueToAbs);
       const totalPassed = regularPass + passWithGrace;
-      const passPct = eligibleOverall > 0 ? ((totalPassed / eligibleOverall) * 100).toFixed(2) : '0.00';
-      const failPct = eligibleOverall > 0 ? ((failedCount / eligibleOverall) * 100).toFixed(2) : '0.00';
+      const passPct = totalRoster > 0 ? ((totalPassed / totalRoster) * 100).toFixed(2) : '0.00';
+      const failPct = totalRoster > 0 ? ((failedCount / totalRoster) * 100).toFixed(2) : '0.00';
       const excludedPct = totalRoster > 0 ? ((excludedDueToAbs / totalRoster) * 100).toFixed(2) : '0.00';
 
       return {
@@ -360,143 +360,7 @@ function analyzeResults(job, students = []) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHEET 1: Summary
-// ─────────────────────────────────────────────────────────────────────────────
-function buildSummarySheet(workbook, job, analysis) {
-      const ws = workbook.addWorksheet('Summary', {
-            views: [{ showGridLines: true }],
-            pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
-      });
-
-      addLogo(workbook, ws, 0.1, 0.1);
-
-      // Institutional Header (Rows 1 & 2)
-      ws.mergeCells('B1:E1');
-      const cCollege = ws.getCell('B1');
-      cCollege.value = (job.collegeName || 'SAGAR INSTITUTE OF RESEARCH & TECHNOLOGY,BHOPAL').toUpperCase();
-      cCollege.font = { name: 'Calibri', size: 12, bold: true, color: { argb: 'FF000000' } };
-      cCollege.alignment = { horizontal: 'center', vertical: 'middle' };
-
-      ws.mergeCells('B2:E2');
-      const cDept = ws.getCell('B2');
-      cDept.value = getDepartmentName(job.branch);
-      cDept.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF333333' } };
-      cDept.alignment = { horizontal: 'center', vertical: 'middle' };
-
-      ws.getRow(1).height = 20;
-      ws.getRow(2).height = 18;
-      ws.getRow(3).height = 8;
-
-      // Major Title Bar (Row 4)
-      ws.mergeCells('A4:E4');
-      const cTitle = ws.getCell('A4');
-      cTitle.value = `${job.branch || 'CSE'} ${getOrdinal(job.semester || 4)} Semester – Consolidated Result Summary`;
-      cTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_BLUE } };
-      cTitle.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFFFFFFF' } };
-      cTitle.alignment = { horizontal: 'center', vertical: 'middle' };
-      ws.getRow(4).height = 26;
-
-      // Right Side Header: Subject-wise ABS (Row 5)
-      const hRight1 = ws.getCell('D5');
-      hRight1.value = 'Subject-wise ABS';
-      hRight1.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_BLUE } };
-      hRight1.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-      hRight1.alignment = { horizontal: 'center', vertical: 'middle' };
-
-      const hRight2 = ws.getCell('E5');
-      hRight2.value = 'Excluded per subject';
-      hRight2.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_BLUE } };
-      hRight2.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-      hRight2.alignment = { horizontal: 'center', vertical: 'middle' };
-      ws.getRow(5).height = 20;
-
-      // Left Column Stats
-      const leftRows = [
-            { label: 'Total Students in Uploaded Files', val: analysis.totalRoster, bold: false },
-            { label: 'Students Included in Overall Analysis', val: analysis.eligibleOverall, bold: false },
-            { label: 'Students Excluded (ABS in one or more subjects)', val: analysis.excludedDueToAbs, bold: false },
-            null, // Spacer
-            { header: 'Overall Result Metrics' },
-            { label: 'Regular Pass', val: analysis.regularPass, bold: false },
-            { label: 'Pass with Grace', val: analysis.passWithGrace, bold: false },
-            { label: 'Total Passed', val: analysis.totalPassed, bold: true },
-            { label: 'Failed', val: analysis.failedCount, bold: false },
-            { label: 'Pass Percentage', val: `${analysis.passPct}%`, bold: true },
-            { label: 'Fail Percentage', val: `${analysis.failPct}%`, bold: false },
-      ];
-
-      const maxRows = Math.max(leftRows.length, analysis.allSubs.length);
-      for (let i = 0; i < maxRows; i++) {
-            const rowNum = 6 + i;
-            const row = ws.getRow(rowNum);
-            row.height = 19;
-
-            // Left table
-            const item = leftRows[i];
-            if (item) {
-                  if (item.header) {
-                        row.getCell('A').value = item.header;
-                        row.getCell('A').font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF1F3864' } };
-                        row.getCell('A').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: ROW_ALT_BG } };
-                        applyBorders(row, 1, 2);
-                  } else if (item.label) {
-                        row.getCell('A').value = item.label;
-                        row.getCell('A').font = { name: 'Calibri', size: 10, bold: item.bold };
-                        row.getCell('A').alignment = { horizontal: 'left', vertical: 'middle' };
-
-                        row.getCell('B').value = item.val;
-                        row.getCell('B').font = { name: 'Calibri', size: 10, bold: item.bold };
-                        row.getCell('B').alignment = { horizontal: 'center', vertical: 'middle' };
-                        applyBorders(row, 1, 2);
-                  }
-            }
-
-            // Right table (Subject-wise ABS)
-            const sub = analysis.allSubs[i];
-            if (sub) {
-                  const st = analysis.subStats[sub.label];
-                  row.getCell('D').value = sub.label;
-                  row.getCell('D').font = { name: 'Calibri', size: 10 };
-                  row.getCell('D').alignment = { horizontal: 'center', vertical: 'middle' };
-
-                  row.getCell('E').value = st ? st.abs : 0;
-                  row.getCell('E').font = { name: 'Calibri', size: 10 };
-                  row.getCell('E').alignment = { horizontal: 'center', vertical: 'middle' };
-                  applyBorders(row, 4, 5);
-            }
-      }
-
-      // Note Card: ABSENT HANDLING
-      const noteTitleRow = 6 + maxRows + 1;
-      ws.mergeCells(`A${noteTitleRow}:E${noteTitleRow}`);
-      const cNoteHeader = ws.getCell(`A${noteTitleRow}`);
-      cNoteHeader.value = 'ABSENT HANDLING';
-      cNoteHeader.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY_BLUE } };
-      cNoteHeader.font = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-      cNoteHeader.alignment = { horizontal: 'left', vertical: 'middle' };
-      ws.getRow(noteTitleRow).height = 20;
-
-      const noteTextStart = noteTitleRow + 1;
-      const noteTextEnd = noteTitleRow + 2;
-      ws.mergeCells(`A${noteTextStart}:E${noteTextEnd}`);
-      const cNote = ws.getCell(`A${noteTextStart}`);
-      cNote.value = 'Overall analysis excludes a student if any of the subject cells contains ABS / F (ABS) / AB. Subject-wise analysis excludes only the ABS entry in that particular subject denominator. The full roster is retained in the Total Students Result sheet.';
-      cNote.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SOFT_PEACH } };
-      cNote.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FF4A3B18' } };
-      cNote.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
-      for (let r = noteTextStart; r <= noteTextEnd; r++) {
-            applyBorders(ws.getRow(r), 1, 5, 'FFD6B656');
-      }
-
-      ws.getColumn('A').width = 44;
-      ws.getColumn('B').width = 16;
-      ws.getColumn('C').width = 6;
-      ws.getColumn('D').width = 22;
-      ws.getColumn('E').width = 22;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SHEET 2: Total Students Result
+// SHEET 1: Total Students Result
 // ─────────────────────────────────────────────────────────────────────────────
 function buildTotalStudentsSheet(workbook, job, analysis) {
       const ws = workbook.addWorksheet('Total Students Result', {
@@ -642,7 +506,7 @@ function buildTotalStudentsSheet(workbook, job, analysis) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHEET 3: Top 10 Toppers
+// SHEET 2: Top 10 Toppers
 // ─────────────────────────────────────────────────────────────────────────────
 function buildToppersSheet(workbook, job, analysis) {
       const ws = workbook.addWorksheet('Top 10 Toppers', {
@@ -769,7 +633,7 @@ function buildToppersSheet(workbook, job, analysis) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHEET 4: Overall Result Analysis
+// SHEET 3: Overall Result Analysis
 // ─────────────────────────────────────────────────────────────────────────────
 function buildOverallAnalysisSheet(workbook, job, analysis) {
       const ws = workbook.addWorksheet('Overall Result Analysis', {
@@ -821,11 +685,9 @@ function buildOverallAnalysisSheet(workbook, job, analysis) {
       applyBorders(hRow, 1, 4);
 
       const rows = [
-            { metric: 'Total students in roster', students: analysis.totalRoster, pct: '100.00%', basis: 'Both source files', bold: false },
-            { metric: 'Excluded due to ABS', students: analysis.excludedDueToAbs, pct: `${analysis.excludedPct}%`, basis: 'ABS/F (ABS)/AB in any subject', bold: false },
-            { metric: 'Eligible for overall analysis', students: analysis.eligibleOverall, pct: '100.00%', basis: 'No ABS in any subject', bold: true },
-            { metric: 'Regular Pass', students: analysis.regularPass, pct: `${analysis.eligibleOverall > 0 ? ((analysis.regularPass / analysis.eligibleOverall) * 100).toFixed(2) : '0.00'}%`, basis: 'Result Decision = PASS', bold: false },
-            { metric: 'Pass with Grace', students: analysis.passWithGrace, pct: `${analysis.eligibleOverall > 0 ? ((analysis.passWithGrace / analysis.eligibleOverall) * 100).toFixed(2) : '0.00'}%`, basis: 'Result Decision = PASS WITH GRACE', bold: false },
+            { metric: 'Total students in roster', students: analysis.totalRoster, pct: '100.00%', basis: 'Both source files - includes ABS-excluded students', bold: false },
+            { metric: 'Regular Pass', students: analysis.regularPass, pct: `${analysis.totalRoster > 0 ? ((analysis.regularPass / analysis.totalRoster) * 100).toFixed(2) : '0.00'}%`, basis: 'Result Decision = PASS', bold: false },
+            { metric: 'Pass with Grace', students: analysis.passWithGrace, pct: `${analysis.totalRoster > 0 ? ((analysis.passWithGrace / analysis.totalRoster) * 100).toFixed(2) : '0.00'}%`, basis: 'Result Decision = PASS WITH GRACE', bold: false },
             { metric: 'Total Passed', students: analysis.totalPassed, pct: `${analysis.passPct}%`, basis: 'Regular + Grace', bold: true },
             { metric: 'Failed', students: analysis.failedCount, pct: `${analysis.failPct}%`, basis: 'Eligible students not passed', bold: false },
       ];
@@ -882,7 +744,7 @@ function buildOverallAnalysisSheet(workbook, job, analysis) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SHEET 5: Subject-wise Result Analysis
+// SHEET 4: Subject-wise Result Analysis
 // ─────────────────────────────────────────────────────────────────────────────
 function buildSubjectAnalysisSheet(workbook, job, analysis) {
       const ws = workbook.addWorksheet('Subject-wise Result Analysis', {
@@ -1205,7 +1067,7 @@ async function generateFilteredWorkbook(job, students, filterType, outputDir) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WORKBOOK 1: All Results.xlsx (Five Worksheets)
+// WORKBOOK 1: All Results.xlsx (Four Worksheets)
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateAllResultsWorkbook(job, students, outputDir) {
       const workbook = new ExcelJS.Workbook();
@@ -1215,8 +1077,7 @@ async function generateAllResultsWorkbook(job, students, outputDir) {
 
       const analysis = analyzeResults(job, students);
 
-      // Build the 5 Worksheets in order:
-      buildSummarySheet(workbook, job, analysis);
+      // Build the 4 Worksheets in order:
       buildTotalStudentsSheet(workbook, job, analysis);
       buildToppersSheet(workbook, job, analysis);
       buildOverallAnalysisSheet(workbook, job, analysis);
