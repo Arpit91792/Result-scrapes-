@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test test/trConverter.test.js"
+    "test": "node --test test/trConverter.test.js",
+    "worker": "node src/worker/cloudWorker.js"
   },
   "dependencies": {
     "archiver": "^6.0.1",
@@ -33,7 +34,8 @@
     "tesseract.js": "^7.0.0",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "socket.io-client": "^4.6.2"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"

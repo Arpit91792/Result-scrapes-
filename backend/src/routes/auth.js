@@ -9,7 +9,7 @@ const FetchJob = require('../models/FetchJob');
 const StudentResult = require('../models/StudentResult');
 const DownloadHistory = require('../models/DownloadHistory');
 const { authenticate, authorize } = require('../middleware/auth');
-const JobProcessor = require('../services/jobProcessor');
+const CloudJobDispatcher = require('../services/cloudJobDispatcher');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -237,9 +237,9 @@ router.delete('/admin/users/:id', authenticate, authorize('admin'), async (req, 
             await user.save();
 
             const jobs = await FetchJob.find({ userId: user._id }).select('_id status');
-            const jobProcessor = new JobProcessor(req.app.get('io'));
+            const jobProcessor = new CloudJobDispatcher(req.app.get('io'));
             for (const job of jobs) {
-                  if (job.status === 'running' || job.status === 'paused') {
+                  if (['queued', 'running', 'paused'].includes(job.status)) {
                         await jobProcessor.cancelJob(job._id);
                   }
             }
