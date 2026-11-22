@@ -4,6 +4,7 @@ const {
   queueJobForWorker,
   removeQueuedJob,
   sendWorkerCommand,
+  waitForWorkerJobFinished,
 } = require('../socket/socketHandlers');
 const logger = require('../utils/logger');
 
@@ -79,6 +80,13 @@ class CloudJobDispatcher {
 
     const refreshedJob = await this.refreshJobStats(jobId);
     if (!refreshedJob) throw new Error('Job not found');
+    job.completedCount = refreshedJob.completedCount;
+    job.pendingCount = refreshedJob.pendingCount;
+    job.passedCount = refreshedJob.passedCount;
+    job.failedCount = refreshedJob.failedCount;
+    job.missingCount = refreshedJob.missingCount;
+    job.verificationRequiredCount = refreshedJob.verificationRequiredCount;
+    job.failedRequestsCount = refreshedJob.failedRequestsCount;
 
     const finishedDocs = await StudentResult.find({
       jobId,
@@ -152,14 +160,23 @@ class CloudJobDispatcher {
     const job = await FetchJob.findById(jobId);
     if (!job) throw new Error('Job not found');
 
-    removeQueuedJob(jobId);
+    const finished = waitForWorkerJobFinished(jobId);
     const sent = sendWorkerCommand(jobId, 'cancel');
     if (!sent) {
+      // No worker is running this job; remove it from the queue and cancel it in-place.
+      removeQueuedJob(jobId);
       job.status = 'cancelled';
       job.errorMessage = 'Job cancelled before cloud execution.';
       await job.save();
+      return job;
     }
-    return job;
+
+    const stopped = await finished;
+    if (!stopped) {
+      throw new Error('Cloud worker did not confirm cancellation within 90 seconds. The job was not deleted; retry after checking worker status.');
+    }
+    const latest = await FetchJob.findById(jobId);
+    return latest || job;
   }
 }
 
