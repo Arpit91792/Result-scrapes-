@@ -85,7 +85,10 @@ async function dispatchWaitingJobs() {
       worker.data.busy = false;
       worker.data.activeJobId = null;
       jobWorkers.delete(next.jobId);
+      queuedJobIds.add(next.jobId);
+      waitingJobs.unshift(next);
       logger.error(`Could not assign job ${next.jobId}: ${err.message}`);
+      break;
     }
   }
 }
@@ -106,7 +109,7 @@ async function recoverQueuedJobs() {
   const jobs = await FetchJob.find({ status: 'queued' })
     .select('_id dataSource')
     .sort({ createdAt: 1 })
-    .limit(200)
+    .limit(1000)
     .lean();
   for (const job of jobs) queueJobForWorker(job._id, job.dataSource === 'demo');
 }
@@ -117,7 +120,11 @@ function setupSocketHandlers(io) {
     const isWorker = auth.role === 'worker';
 
     if (isWorker) {
-      if (!safeSecretMatch(auth.workerSecret, process.env.WORKER_SHARED_SECRET)) {
+      if (
+        !process.env.WORKER_SHARED_SECRET
+        || process.env.WORKER_SHARED_SECRET.length < 32
+        || !safeSecretMatch(auth.workerSecret, process.env.WORKER_SHARED_SECRET)
+      ) {
         logger.warn(`Rejected unauthenticated worker socket ${socket.id}`);
         socket.disconnect(true);
         return;
