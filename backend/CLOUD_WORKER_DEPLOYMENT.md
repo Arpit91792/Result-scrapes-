@@ -13,6 +13,8 @@ The API and browser worker are separate Render services. The API queues jobs; th
 
 ## 2. Create a separate Render Background Worker
 
+> **Important cost note:** Render Background Workers do not have a Free instance type. Render's free-instance list covers Web Services, Postgres and Key Value; other service types require paid compute. Chromium plus OCR also makes the 512 MB tier unsuitable for this workload. Check the current Render compute pricing before creating the worker.
+
 Use the same repository and branch, but create a **Background Worker** service:
 
 - Branch: `cloud-worker-architecture` (after merging the pull request, use `main`)
