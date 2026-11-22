@@ -7,6 +7,7 @@ import toast from 'react-hot-toast';
 function JobCard({ job, onDelete, deletingId }) {
       const pct = job.totalStudents ? Math.round((job.completedCount / job.totalStudents) * 100) : 0;
       const statusColors = {
+            queued: 'bg-purple-100 text-purple-700',
             running: 'bg-blue-100 text-blue-700',
             completed: 'bg-green-100 text-green-700',
             paused: 'bg-yellow-100 text-yellow-700',
