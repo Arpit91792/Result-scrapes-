@@ -354,6 +354,7 @@ export default function AllResultsPage() {
             && Number(p?.verificationRequiredCount || 0) === 0;
 
       const statusColorMap = {
+            queued: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300',
             running: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
             completed: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
             paused: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300',
@@ -450,7 +451,7 @@ export default function AllResultsPage() {
                         </p>
 
                         <div className="flex flex-wrap gap-2 mt-3">
-                              {p?.status === 'running' && (
+                              {['queued', 'running'].includes(p?.status) && (
                                     <button onClick={() => ctrl('pause')} className="btn-secondary text-xs py-1.5">
                                           <Pause className="w-3.5 h-3.5" /> Pause
                                     </button>
@@ -460,7 +461,7 @@ export default function AllResultsPage() {
                                           <Play className="w-3.5 h-3.5" /> Resume
                                     </button>
                               )}
-                              {['running', 'paused'].includes(p?.status) && (
+                              {['queued', 'running', 'paused'].includes(p?.status) && (
                                     <button onClick={() => ctrl('cancel')} className="btn-danger text-xs py-1.5">
                                           <StopCircle className="w-3.5 h-3.5" /> Cancel
                                     </button>
