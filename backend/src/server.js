@@ -17,6 +17,7 @@ const trConverterRoutes = require('./routes/trConverter');
 const { setupSocketHandlers } = require('./socket/socketHandlers');
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const PORT = parseInt(process.env.PORT) || 5002;
 
