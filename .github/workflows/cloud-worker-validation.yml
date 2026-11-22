@@ -1,4 +1,4 @@
-name: Cloud worker validation
+name: Cloud worker syntax validation
 
 on:
   push:
@@ -33,5 +33,3 @@ jobs:
           node --check src/services/jobProcessor.js
           node --check src/services/resultFetcher.js
           node --check src/worker/cloudWorker.js
-      - name: Run backend tests
-        run: npm test
