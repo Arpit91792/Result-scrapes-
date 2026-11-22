@@ -335,13 +335,9 @@ router.delete('/job/:jobId', authenticate, async (req, res, next) => {
             const job = await FetchJob.findOne({ _id: req.params.jobId, userId: req.user._id });
             if (!job) return res.status(404).json({ error: 'Job not found' });
 
-            // If job is currently running, stop/cancel it first
-            if (job.status === 'running') {
-                  try {
-                        await getJobProcessor(req).cancelJob(req.params.jobId);
-                  } catch (e) {
-                        logger.warn(`Error cancelling running job before delete: ${e.message}`);
-                  }
+            // Stop queued or active cloud work before deleting any associated records.
+            if (['queued', 'running', 'paused'].includes(job.status)) {
+                  await getJobProcessor(req).cancelJob(req.params.jobId);
             }
 
             // Delete all associated student results
