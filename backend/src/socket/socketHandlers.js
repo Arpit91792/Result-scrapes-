@@ -107,6 +107,7 @@ function setupSocketHandlers(io) {
         workers.set(id, socket);
 
         if (activeJobId) {
+          removeQueuedJob(activeJobId);
           jobWorkers.set(String(activeJobId), id);
         } else {
           for (const [jobId, assignedWorkerId] of jobWorkers.entries()) {
