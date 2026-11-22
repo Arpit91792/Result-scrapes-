@@ -12,7 +12,7 @@ const DownloadHistory = require('../models/DownloadHistory');
 const { generateEnrollments, deduplicateEnrollments, validateEnrollment } = require('../utils/enrollmentGenerator');
 const { generateExcelReport, generateFilteredExcel, generateExcelFile } = require('../services/excelExporter');
 const { generateStudentPDF, generateZipArchive } = require('../services/pdfExporter');
-const JobProcessor = require('../services/jobProcessor');
+const CloudJobDispatcher = require('../services/cloudJobDispatcher');
 const logger = require('../utils/logger');
 
 const router = express.Router();
@@ -22,7 +22,7 @@ let jobProcessor = null;
 
 function getJobProcessor(req) {
       if (!jobProcessor) {
-            jobProcessor = new JobProcessor(req.app.get('io'));
+            jobProcessor = new CloudJobDispatcher(req.app.get('io'));
       }
       return jobProcessor;
 }
