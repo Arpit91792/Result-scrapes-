@@ -407,14 +407,32 @@ class JobProcessor {
       async pauseJob(jobId) {
             const f = activeJobs.get(String(jobId));
             if (f) f.pause();
-            await FetchJob.findByIdAndUpdate(jobId, { status: 'paused' });
+            const updatedJob = await FetchJob.findByIdAndUpdate(jobId, { status: 'paused' }, { new: true });
+            if (updatedJob) {
+                  this.emitProgress(jobId, updatedJob, {
+                        message: 'Job paused',
+                        tabs: f ? f.getTabsStatus() : [],
+                        activeTabsCount: f ? f.getActiveTabsCount() : 0,
+                        maxTabs: f ? f.maxTabs : parseInt(process.env.MAX_PARALLEL_TABS || '100', 10),
+                        processingCount: f ? f.getProcessingCount() : 0,
+                  });
+            }
       }
 
       async resumeJob(jobId) {
             const f = activeJobs.get(String(jobId));
             if (f && !f.isCancelled) {
                   f.resume();
-                  await FetchJob.findByIdAndUpdate(jobId, { status: 'running' });
+                  const updatedJob = await FetchJob.findByIdAndUpdate(jobId, { status: 'running' }, { new: true });
+                  if (updatedJob) {
+                        this.emitProgress(jobId, updatedJob, {
+                              message: 'Job resumed',
+                              tabs: f.getTabsStatus(),
+                              activeTabsCount: f.getActiveTabsCount(),
+                              maxTabs: f.maxTabs,
+                              processingCount: f.getProcessingCount(),
+                        });
+                  }
             } else {
                   const activeRun = activeRuns.get(String(jobId));
                   if (activeRun) await activeRun;

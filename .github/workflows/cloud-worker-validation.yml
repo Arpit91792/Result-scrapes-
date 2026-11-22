@@ -1,0 +1,35 @@
+name: Cloud worker syntax validation
+
+on:
+  push:
+    branches:
+      - cloud-worker-architecture
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  backend-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        run: npm install
+      - name: Check JavaScript syntax
+        run: |
+          node --check src/server.js
+          node --check src/socket/socketHandlers.js
+          node --check src/routes/auth.js
+          node --check src/routes/results.js
+          node --check src/services/cloudJobDispatcher.js
+          node --check src/services/jobProcessor.js
+          node --check src/services/resultFetcher.js
+          node --check src/worker/cloudWorker.js
