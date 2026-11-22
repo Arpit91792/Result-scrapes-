@@ -7,6 +7,7 @@ const workers = new Map();
 const jobWorkers = new Map();
 const waitingJobs = [];
 const queuedJobIds = new Set();
+const finishWaiters = new Map();
 
 const CLIENT_RELAY_EVENTS = new Set([
   'progress', 'log', 'tabs_status', 'captcha_required', 'captcha_status', 'job_completed',
@@ -33,6 +34,31 @@ function removeQueuedJob(jobId) {
   const index = waitingJobs.findIndex((item) => item.jobId === id);
   if (index >= 0) waitingJobs.splice(index, 1);
   queuedJobIds.delete(id);
+}
+
+
+function waitForWorkerJobFinished(jobId, timeoutMs = 90000) {
+  const id = String(jobId);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      finishWaiters.delete(id);
+      resolve(false);
+    }, timeoutMs);
+    finishWaiters.set(id, () => {
+      clearTimeout(timer);
+      finishWaiters.delete(id);
+      resolve(true);
+    });
+  });
+}
+
+function cancelWorkerFinishWait(jobId) {
+  const id = String(jobId);
+  const resolver = finishWaiters.get(id);
+  if (resolver) {
+    finishWaiters.delete(id);
+    resolver();
+  }
 }
 
 function queueJobForWorker(jobId, demoMode = false) {
@@ -130,6 +156,7 @@ function setupSocketHandlers(io) {
         const id = String(jobId || '');
         if (!id || jobWorkers.get(id) !== socket.data.workerId) return;
         jobWorkers.delete(id);
+        cancelWorkerFinishWait(id);
         socket.data.busy = false;
         socket.data.activeJobId = null;
         logger.info(`Cloud worker released job ${id}`);
@@ -181,5 +208,6 @@ module.exports = {
   queueJobForWorker,
   removeQueuedJob,
   sendWorkerCommand,
+  waitForWorkerJobFinished,
   recoverQueuedJobs,
 };
