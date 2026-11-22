@@ -209,5 +209,6 @@ module.exports = {
   removeQueuedJob,
   sendWorkerCommand,
   waitForWorkerJobFinished,
+  cancelWorkerFinishWait,
   recoverQueuedJobs,
 };
