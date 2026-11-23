@@ -174,3 +174,11 @@ connectDatabase().then(async () => {
 });
 
 module.exports = { app, server };
+// Backend Homepage Route
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'RGPV Result API is running successfully',
+    health: '/api/health'
+  });
+});
