@@ -66,7 +66,14 @@ app.get('/api/health', (req, res) => {
     mode: process.env.NODE_ENV || 'development',
   });
 });
-
+// Backend Homepage Route
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    message: 'RGPV Result API is running successfully',
+    health: '/api/health'
+  });
+});
 // ── 404 ────────────────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
@@ -174,11 +181,3 @@ connectDatabase().then(async () => {
 });
 
 module.exports = { app, server };
-// Backend Homepage Route
-app.get('/', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    message: 'RGPV Result API is running successfully',
-    health: '/api/health'
-  });
-});
